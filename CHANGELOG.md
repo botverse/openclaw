@@ -39,6 +39,7 @@ Docs: https://docs.openclaw.ai
 - feat(memory): native Voyage AI support. (#7078) Thanks @mcinteerj.
 - Memory: document Voyage embeddings env var. (#10699) Thanks @Takhoffman.
 - feat(antigravity): update default model to Claude Opus 4.6. (#10720) Thanks @calvin-hpnet.
+- docs(imessage): improve macOS TCC troubleshooting guidance and links. (#10761) Thanks @gitpds.
 
 ### Fixes
 
