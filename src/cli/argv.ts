@@ -167,6 +167,9 @@ export function shouldMigrateStateFromPath(path: string[]): boolean {
   if (primary === "agent") {
     return false;
   }
+  if (primary === "cc") {
+    return false;
+  }
   return true;
 }
 
