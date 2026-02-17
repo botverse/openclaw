@@ -12,9 +12,10 @@ export function buildCronEventPrompt(pendingEvents: string[]): string {
     );
   }
   return (
-    "A scheduled reminder has been triggered. The reminder content is:\n\n" +
+    "A scheduled cron job has fired. The task instructions are:\n\n" +
     eventText +
-    "\n\nPlease relay this reminder to the user in a helpful and friendly way."
+    "\n\nExecute the requested task fully — do NOT reply with HEARTBEAT_OK. " +
+    "Complete the work described, then report the results."
   );
 }
 
