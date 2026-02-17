@@ -1,3 +1,4 @@
+import type { ClaudeCodeSubagentConfig } from "../agents/claude-code/types.js";
 import type { ChatType } from "../channels/chat-type.js";
 import type { AgentDefaultsConfig } from "./types.agent-defaults.js";
 import type { AgentModelConfig, AgentSandboxConfig } from "./types.agents-shared.js";
@@ -26,6 +27,8 @@ export type AgentConfig = {
     allowAgents?: string[];
     /** Per-agent default model for spawned sub-agents (string or {primary,fallbacks}). */
     model?: AgentModelConfig;
+    /** Per-agent Claude Code spawn mode overrides. */
+    claudeCode?: ClaudeCodeSubagentConfig;
   };
   /** Optional per-agent sandbox overrides. */
   sandbox?: AgentSandboxConfig;

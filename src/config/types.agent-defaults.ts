@@ -1,3 +1,4 @@
+import type { ClaudeCodeSubagentConfig } from "../agents/claude-code/types.js";
 import type { ChannelId } from "../channels/plugins/types.js";
 import type { AgentModelConfig, AgentSandboxConfig } from "./types.agents-shared.js";
 import type {
@@ -251,6 +252,8 @@ export type AgentDefaultsConfig = {
     runTimeoutSeconds?: number;
     /** Gateway timeout in ms for sub-agent announce delivery calls (default: 60000). */
     announceTimeoutMs?: number;
+    /** Claude Code spawn mode configuration. */
+    claudeCode?: ClaudeCodeSubagentConfig;
   };
   /** Optional sandbox settings for non-main sessions. */
   sandbox?: AgentSandboxConfig;
