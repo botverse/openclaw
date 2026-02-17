@@ -148,6 +148,45 @@ export const AgentDefaultsSchema = z
         thinking: z.string().optional(),
         runTimeoutSeconds: z.number().int().min(0).optional(),
         announceTimeoutMs: z.number().int().positive().optional(),
+        claudeCode: z
+          .object({
+            enabled: z.boolean().optional(),
+            binaryPath: z.string().nullable().optional(),
+            defaultRepo: z.string().nullable().optional(),
+            repos: z.record(z.string(), z.string()).optional(),
+            maxBudgetUsd: z.number().positive().optional(),
+            timeoutSeconds: z.number().int().positive().optional(),
+            permissionMode: z
+              .union([
+                z.literal("acceptEdits"),
+                z.literal("bypassPermissions"),
+                z.literal("default"),
+                z.literal("delegate"),
+                z.literal("dontAsk"),
+                z.literal("plan"),
+              ])
+              .optional(),
+            dangerouslySkipPermissions: z.boolean().optional(),
+            model: z.string().nullable().optional(),
+            mcpBridge: z
+              .object({
+                enabled: z.boolean().optional(),
+                exposeMemory: z.boolean().optional(),
+                exposeConversation: z.boolean().optional(),
+              })
+              .strict()
+              .optional(),
+            progressRelay: z
+              .object({
+                enabled: z.boolean().optional(),
+                intervalSeconds: z.number().int().positive().optional(),
+                includeToolUse: z.boolean().optional(),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
