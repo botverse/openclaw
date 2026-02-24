@@ -23,6 +23,7 @@ import {
 } from "../../routing/session-key.js";
 import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
 import { resolveAgentDir } from "../agent-scope.js";
+import { getLiveSession } from "../claude-code/live-state.js";
 import { formatUserTime, resolveUserTimeFormat, resolveUserTimezone } from "../date-time.js";
 import { resolveModelAuthLabel } from "../model-auth-label.js";
 import { loadModelCatalog } from "../model-catalog.js";
@@ -33,6 +34,7 @@ import {
   resolveDefaultModelForAgent,
   resolveModelRefFromString,
 } from "../model-selection.js";
+import { findSubagentRunByChildSessionKey } from "../subagent-registry.js";
 import type { AnyAgentTool } from "./common.js";
 import { readStringParam } from "./common.js";
 import {
@@ -254,6 +256,62 @@ export function createSessionStatusTool(opts?: {
       }
 
       if (!resolved) {
+        // ── CC spawn shortcut: build status from subagent registry + live session ──
+        const CC_SPAWN_PATTERN = /^agent:[^:]+:cc-spawn:/;
+        if (CC_SPAWN_PATTERN.test(requestedKeyRaw)) {
+          const run = findSubagentRunByChildSessionKey(requestedKeyRaw);
+          if (run) {
+            const liveSession = run.ccRepoPath ? getLiveSession(run.ccRepoPath) : undefined;
+            const isRunning = !!liveSession;
+            const durationMs = run.endedAt
+              ? run.endedAt - run.createdAt
+              : Date.now() - run.createdAt;
+            const durationSec = Math.round(durationMs / 1000);
+            const costUsd = liveSession?.accumulatedCostUsd ?? 0;
+            const turns = liveSession?.accumulatedTurns ?? 0;
+            const outcome = run.outcome
+              ? `${run.outcome.status}${run.outcome.status === "error" && "error" in run.outcome ? `: ${run.outcome.error}` : ""}`
+              : isRunning
+                ? "in progress"
+                : "unknown";
+
+            const lines = [
+              `📊 *CC Spawn Status*`,
+              ``,
+              `*Session key:* \`${requestedKeyRaw}\``,
+              `*Status:* ${isRunning ? "🟢 running" : "⚪ stopped"}`,
+              `*Outcome:* ${outcome}`,
+              `*Task:* ${run.task.slice(0, 200)}`,
+              run.label ? `*Label:* ${run.label}` : undefined,
+              run.model ? `*Model:* ${run.model}` : undefined,
+              `*Repo:* ${run.ccRepoPath ?? "unknown"}`,
+              `*Duration:* ${durationSec}s`,
+              costUsd > 0 ? `*Cost:* $${costUsd.toFixed(4)}` : undefined,
+              turns > 0 ? `*Turns:* ${turns}` : undefined,
+              liveSession?.lastActivityText
+                ? `*Last activity:* ${liveSession.lastActivityText.slice(0, 100)}`
+                : undefined,
+              liveSession?.sessionId ? `*CC Session:* \`${liveSession.sessionId}\`` : undefined,
+            ]
+              .filter((l): l is string => l != null)
+              .join("\n");
+
+            return {
+              content: [{ type: "text", text: lines }],
+              details: {
+                ok: true,
+                sessionKey: requestedKeyRaw,
+                ccSpawn: true,
+                running: isRunning,
+                durationSec,
+                costUsd,
+                turns,
+                outcome,
+              },
+            };
+          }
+        }
+
         const kind = shouldResolveSessionIdInput(requestedKeyRaw) ? "sessionId" : "sessionKey";
         throw new Error(`Unknown ${kind}: ${requestedKeyRaw}`);
       }
