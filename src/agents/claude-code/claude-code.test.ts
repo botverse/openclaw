@@ -59,7 +59,7 @@ describe("parseOutboundMessage", () => {
     const msg = parseOutboundMessage(raw);
     expect(msg).toBeTruthy();
     expect(msg!.type).toBe("system");
-    const sys = msg as CCSystemStatusMessage;
+    const sys = msg as unknown as CCSystemStatusMessage;
     expect(sys.subtype).toBe("status");
     expect(sys.permissionMode).toBe("bypassPermissions");
   });
@@ -170,7 +170,7 @@ describe("parseOutboundMessage", () => {
       uuid: "abc",
       session_id: "sess-1",
     });
-    const msg = parseOutboundMessage(raw) as CCAuthStatusMessage;
+    const msg = parseOutboundMessage(raw) as unknown as CCAuthStatusMessage;
     expect(msg.type).toBe("auth_status");
     expect(msg.error).toBe("token expired");
   });

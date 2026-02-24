@@ -3,7 +3,13 @@
  */
 
 export { resolveClaudeBinary } from "./binary.js";
-export { spawnClaudeCode, sendFollowUp, respondToPermission } from "./runner.js";
+export {
+  spawnClaudeCode,
+  sendFollowUp,
+  sendFollowUpAndWait,
+  stopPersistentSession,
+  respondToPermission,
+} from "./runner.js";
 export {
   killClaudeCode,
   killAllClaudeCode,
@@ -61,3 +67,5 @@ export type {
   CCAssistantMessage,
   CCSystemMessage,
 } from "./protocol.js";
+// Re-export tgcc library types for downstream consumers
+export { CCProcess, type CCProcessOptions, type CCUserConfig } from "@fonz/tgcc";

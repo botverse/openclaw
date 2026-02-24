@@ -1,15 +1,93 @@
 /**
- * Stream-JSON protocol types for Claude Code CLI (v2.1.41+).
+ * Stream-JSON protocol types for Claude Code CLI.
  *
- * The CLI uses NDJSON (newline-delimited JSON) over stdin/stdout when invoked
- * with `-p --output-format stream-json --input-format stream-json --verbose`.
- *
- * These types are derived from empirical analysis of the CLI source. The npm
- * package does not export protocol types — only tool input schemas.
+ * Core protocol types are re-exported from @fonz/tgcc/protocol.
+ * OpenClaw-specific extensions are defined here.
  */
 
+// Re-export core protocol types from the library
+export {
+  parseCCOutputLine,
+  extractAssistantText,
+  extractToolUses,
+  isStreamTextDelta,
+  isStreamThinkingDelta,
+  getStreamBlockType,
+  createTextMessage,
+  createImageMessage,
+  createDocumentMessage,
+  createInitializeRequest,
+  createPermissionResponse,
+  serializeMessage,
+  type TextContent,
+  type ImageContent,
+  type ContentBlock,
+  type UserMessage,
+  type ControlRequestInitialize,
+  type PermissionRequest,
+  type ControlRequest,
+  type ControlResponse,
+  type InitEvent,
+  type AssistantTextBlock,
+  type AssistantToolUseBlock,
+  type AssistantThinkingBlock,
+  type AssistantContentBlock,
+  type AssistantMessage,
+  type ToolResultEvent,
+  type ResultEvent,
+  type ApiErrorEvent,
+  type CCOutputEvent,
+  type StreamMessageStart,
+  type StreamContentBlockStart,
+  type StreamContentBlockStartText,
+  type StreamContentBlockStartThinking,
+  type StreamContentBlockStartToolUse,
+  type StreamTextDelta,
+  type StreamThinkingDelta,
+  type StreamInputJsonDelta,
+  type StreamContentBlockDelta,
+  type StreamContentBlockStop,
+  type StreamMessageStop,
+  type StreamInnerEvent,
+  type StreamEvent,
+} from "@fonz/tgcc/protocol";
+
 // ---------------------------------------------------------------------------
-// Shared
+// Back-compat aliases for existing OpenClaw code
+// ---------------------------------------------------------------------------
+
+// parseOutboundMessage wraps parseCCOutputLine with OpenClaw-specific types
+import { parseCCOutputLine as _parseCCOutputLine } from "@fonz/tgcc/protocol";
+
+/**
+ * Parse a CC output line. Handles both core protocol types (via @fonz/tgcc)
+ * and OpenClaw-specific extensions (auth_status, system subtypes, etc.).
+ */
+export function parseOutboundMessage(raw: string): CCOutboundMessage | null {
+  // Try the library parser first (handles core types)
+  const result = _parseCCOutputLine(raw);
+  if (result) {
+    return result as unknown as CCOutboundMessage;
+  }
+
+  // Fallback: parse OpenClaw-specific types the library doesn't know about
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed === "object" && parsed !== null && typeof parsed.type === "string") {
+      return parsed as CCOutboundMessage;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// OpenClaw-specific protocol extensions
 // ---------------------------------------------------------------------------
 
 export type ClaudeCodeUsage = {
@@ -19,9 +97,8 @@ export type ClaudeCodeUsage = {
   cache_read_input_tokens?: number;
 };
 
-// ---------------------------------------------------------------------------
-// Messages FROM Claude Code (stdout)
-// ---------------------------------------------------------------------------
+// OpenClaw-specific message types that extend the core protocol with
+// OpenClaw-only fields (e.g. permissionMode on system messages, hooks, auth).
 
 /** System message — session init, status, hooks, task notifications. */
 export type CCSystemMessage =
@@ -104,7 +181,7 @@ export type CCSystemTaskNotificationMessage = {
   session_id: string;
 };
 
-/** Assistant message — Claude's response with text and tool_use blocks. */
+/** Assistant message with OpenClaw extensions. */
 export type CCAssistantMessage = {
   type: "assistant";
   message: {
@@ -151,7 +228,7 @@ export type CCToolResultBlock = {
   content: string;
 };
 
-/** Result message — terminal, always the last message. */
+/** Result message. */
 export type CCResultMessage = {
   type: "result";
   subtype: CCResultSubtype;
@@ -176,15 +253,14 @@ export type CCResultSubtype =
   | "error_max_turns"
   | "error_max_budget_usd";
 
-/** Stream event — partial deltas for real-time display. */
+/** Stream event. */
 export type CCStreamEvent = {
   type: "stream_event";
-  // Contains content_block_delta with text_delta fragments (high-frequency).
   event?: { type?: string; [key: string]: unknown };
   [key: string]: unknown;
 };
 
-/** Auth status — emitted when auth state changes. */
+/** Auth status. */
 export type CCAuthStatusMessage = {
   type: "auth_status";
   isAuthenticating: boolean;
@@ -194,7 +270,7 @@ export type CCAuthStatusMessage = {
   session_id: string;
 };
 
-/** Control response — response to a control_request we sent. */
+/** Control response. */
 export type CCControlResponse = {
   type: "control_response";
   response: {
@@ -216,21 +292,14 @@ export type CCOutboundMessage =
   | CCAuthStatusMessage
   | CCControlResponse;
 
-// ---------------------------------------------------------------------------
-// Messages TO Claude Code (stdin)
-// ---------------------------------------------------------------------------
+// Inbound types kept for backward compatibility
 
-/** User message — send a prompt or follow-up. */
 export type CCUserInput = {
   type: "user";
-  message: {
-    role: "user";
-    content: string;
-  };
+  message: { role: "user"; content: string };
   uuid: string;
 };
 
-/** Control request — change settings mid-session. */
 export type CCControlRequest = {
   type: "control_request";
   request: CCControlRequestPayload;
@@ -243,31 +312,6 @@ export type CCControlRequestPayload =
   | { subtype: "initialize" }
   | { subtype: "mcp_status" };
 
-/** Keep-alive — prevent stdin EOF. */
-export type CCKeepAlive = {
-  type: "keep_alive";
-};
+export type CCKeepAlive = { type: "keep_alive" };
 
-/** Union of all inbound (stdin) message types. */
 export type CCInboundMessage = CCUserInput | CCControlRequest | CCKeepAlive;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Type guard for outbound messages. */
-export function parseOutboundMessage(raw: string): CCOutboundMessage | null {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (typeof parsed === "object" && parsed !== null && typeof parsed.type === "string") {
-      return parsed as CCOutboundMessage;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}

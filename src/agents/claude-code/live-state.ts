@@ -27,6 +27,8 @@ export type LiveSession = {
   persistent: boolean;
   pendingFollowUp: { resolve: (r: ClaudeCodeResult) => void; reject: (e: Error) => void } | null;
   persistentIdleTimer: ReturnType<typeof setTimeout> | null;
+  /** CCProcess instance (set by runner when using @fonz/tgcc). */
+  _ccProcess?: unknown;
 };
 
 export type RepoQueueEntry = {
