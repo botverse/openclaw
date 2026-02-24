@@ -3,15 +3,21 @@ import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import { loadConfig } from "../../config/config.js";
 import { callGateway } from "../../gateway/call.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../../routing/session-key.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
+import { gatherProjectStatus } from "../claude-code/project-status.js";
 import { spawnClaudeCode } from "../claude-code/runner.js";
+import { selectSession } from "../claude-code/session-selection.js";
+import { resolveSession } from "../claude-code/sessions.js";
 import type { ClaudeCodePermissionMode } from "../claude-code/types.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import { SUBAGENT_SPAWN_MODES, spawnSubagentDirect } from "../subagent-spawn.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
+
+const log = createSubsystemLogger("agents/sessions-spawn");
 
 const SessionsSpawnToolSchema = Type.Object({
   task: Type.String(),
@@ -105,11 +111,16 @@ export function createSessionsSpawnTool(opts?: {
         }
         repoPath = path.resolve(repoPath);
 
+        const freshSession = params.freshSession === true;
+        const sessionLabel = label || undefined;
+
         const permissionModeParam = readStringParam(params, "permissionMode");
         const permissionMode: ClaudeCodePermissionMode =
-          (permissionModeParam as ClaudeCodePermissionMode) ??
-          ccConfig.permissionMode ??
-          "bypassPermissions";
+          ccConfig.dangerouslySkipPermissions === true
+            ? "bypassPermissions"
+            : ((permissionModeParam as ClaudeCodePermissionMode) ??
+              ccConfig.permissionMode ??
+              "bypassPermissions");
 
         const ccModel = modelOverride ?? ccConfig.model ?? undefined;
         const ccTimeout =
@@ -120,6 +131,50 @@ export function createSessionsSpawnTool(opts?: {
           opts?.requesterAgentIdOverride ??
             parseAgentSessionKey(opts?.agentSessionKey ?? "")?.agentId,
         );
+
+        // Intelligent session selection: score all candidate sessions using
+        // branch match, recency, task relevance, health, and context capacity.
+        // Falls back to legacy --continue strategy if selection fails.
+        let sessionToResume: string | undefined;
+        let shouldContinue = false;
+        if (!freshSession) {
+          try {
+            const projectStatus = await gatherProjectStatus(repoPath, requesterAgentId);
+            const selection = await selectSession(
+              task,
+              repoPath,
+              requesterAgentId,
+              projectStatus,
+              sessionLabel,
+              ccBudget,
+              ccConfig.sessionSelection,
+            );
+            log.info(`Session selection: ${selection.action} — ${selection.reason}`);
+
+            if (selection.action === "resume" && selection.sessionId) {
+              sessionToResume = selection.sessionId;
+            } else if (selection.action === "queue") {
+              return jsonResult({
+                status: "queued",
+                reason: selection.reason,
+              });
+            }
+            // action === "fresh" → sessionToResume stays undefined, shouldContinue stays false
+          } catch (err) {
+            // Fallback to legacy behavior if selection fails
+            log.warn(
+              `Session selection failed, using legacy strategy: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            if (sessionLabel) {
+              sessionToResume = resolveSession(requesterAgentId, repoPath, sessionLabel);
+              if (!sessionToResume) {
+                shouldContinue = true;
+              }
+            } else {
+              shouldContinue = true;
+            }
+          }
+        }
 
         const spawnId = crypto.randomUUID();
         const repoLabel = repoParam || path.basename(repoPath);
@@ -134,7 +189,10 @@ export function createSessionsSpawnTool(opts?: {
               timeoutSeconds: ccTimeout,
               maxBudgetUsd: ccBudget,
               permissionMode,
+              resume: sessionToResume,
+              continueSession: shouldContinue,
               agentId: requesterAgentId,
+              label: sessionLabel,
               binaryPath: ccConfig.binaryPath ?? undefined,
               mcpBridge: ccConfig.mcpBridge,
               progressRelay: ccConfig.progressRelay,

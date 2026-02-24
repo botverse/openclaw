@@ -309,15 +309,19 @@ async function executeSpawn(options: ClaudeCodeSpawnOptions): Promise<ClaudeCode
 
   // 7b. Send initial task on stdin — keep stdin OPEN for multi-turn
   // CC processes stdin in order: initialize will be handled before this message.
+  // Prepend source attribution marker so JSONL scanners can identify OpenClaw sessions
+  const marker = `[openclaw:agent=${agentId}]`;
   // When resuming, prepend previous session context so CC knows what happened
-  let taskContent = options.task;
+  let taskContent = `${marker}\n\n${options.task}`;
   if (sessionContext) {
     taskContent = [
+      marker,
+      "",
       "<previous_session_context>",
       sessionContext,
       "</previous_session_context>",
       "",
-      taskContent,
+      options.task,
     ].join("\n");
   }
   const initMessage = JSON.stringify({
