@@ -85,7 +85,7 @@ export function repoPathToSlug(repoPath: string): string {
  * Uses the confirmed slug algorithm as the primary path,
  * with a broad-search fallback as safety net.
  */
-function findSessionJsonlPath(repoPath: string, sessionId: string): string | undefined {
+export function findSessionJsonlPath(repoPath: string, sessionId: string): string | undefined {
   const claudeDir = path.join(os.homedir(), ".claude", "projects");
   if (!fs.existsSync(claudeDir)) {
     return undefined;

@@ -1,9 +1,17 @@
+import fs from "node:fs";
 import { Type } from "@sinclair/typebox";
 import { loadConfig } from "../../config/config.js";
 import { callGateway } from "../../gateway/call.js";
 import { capArrayByJsonBytes } from "../../gateway/session-utils.fs.js";
 import { redactSensitiveText } from "../../logging/redact.js";
+import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { truncateUtf16Safe } from "../../utils.js";
+import { getLiveSession } from "../claude-code/live-state.js";
+import {
+  findSessionJsonlPath,
+  resolveSession as resolveCcSession,
+} from "../claude-code/sessions.js";
+import { findSubagentRunByChildSessionKey } from "../subagent-registry.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
 import {
@@ -173,6 +181,64 @@ function enforceSessionsHistoryHardCap(params: {
   return { items: placeholder, bytes: jsonUtf8Bytes(placeholder), hardCapped: true };
 }
 
+/**
+ * Parse a CC session JSONL transcript into conversation messages suitable
+ * for sessions_history output. Extracts user/assistant messages, optionally
+ * including tool_use/tool_result blocks.
+ */
+function parseCcJsonlHistory(
+  jsonlPath: string,
+  opts?: { limit?: number; includeTools?: boolean },
+): unknown[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(jsonlPath, "utf8");
+  } catch {
+    return [];
+  }
+  const lines = raw.split("\n").filter((l) => l.trim());
+  const messages: unknown[] = [];
+
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      const msg = entry.message ?? entry;
+      const role = typeof msg.role === "string" ? msg.role : undefined;
+      if (!role) {
+        continue;
+      }
+
+      // Skip tool messages unless requested
+      if (!opts?.includeTools && (role === "tool" || msg.type === "tool_result")) {
+        continue;
+      }
+
+      // Skip tool_use content blocks in assistant messages if not including tools
+      if (!opts?.includeTools && role === "assistant" && Array.isArray(msg.content)) {
+        const textBlocks = msg.content.filter(
+          (b: { type: string }) => b.type === "text" || b.type === "thinking",
+        );
+        if (textBlocks.length === 0) {
+          continue;
+        }
+        messages.push({ ...msg, content: textBlocks });
+        continue;
+      }
+
+      if (role === "user" || role === "assistant") {
+        messages.push(msg);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (opts?.limit && messages.length > opts.limit) {
+    return messages.slice(-opts.limit);
+  }
+  return messages;
+}
+
 export function createSessionsHistoryTool(opts?: {
   agentSessionKey?: string;
   sandboxed?: boolean;
@@ -246,6 +312,62 @@ export function createSessionsHistoryTool(opts?: {
           ? Math.max(1, Math.floor(params.limit))
           : undefined;
       const includeTools = Boolean(params.includeTools);
+
+      // ── CC spawn shortcut: read history from JSONL transcript ──
+      const CC_SPAWN_PATTERN = /^agent:[^:]+:cc-spawn:/;
+      if (CC_SPAWN_PATTERN.test(resolvedKey)) {
+        const run = findSubagentRunByChildSessionKey(resolvedKey);
+        if (run?.ccRepoPath) {
+          const agentId = resolveAgentIdFromSessionKey(resolvedKey);
+          // Try live session first, fall back to registry lookup
+          const liveSession = getLiveSession(run.ccRepoPath);
+          const sessionId =
+            liveSession?.sessionId ?? resolveCcSession(agentId, run.ccRepoPath, run.label);
+          if (sessionId) {
+            const jsonlPath = findSessionJsonlPath(run.ccRepoPath, sessionId);
+            if (jsonlPath) {
+              const messages = parseCcJsonlHistory(jsonlPath, {
+                limit,
+                includeTools,
+              });
+              const sanitizedMessages = messages.map((m) => sanitizeHistoryMessage(m));
+              const contentTruncated = sanitizedMessages.some((e) => e.truncated);
+              const contentRedacted = sanitizedMessages.some((e) => e.redacted);
+              const cappedMessages = capArrayByJsonBytes(
+                sanitizedMessages.map((e) => e.message),
+                SESSIONS_HISTORY_MAX_BYTES,
+              );
+              const droppedMessages = cappedMessages.items.length < messages.length;
+              const hardened = enforceSessionsHistoryHardCap({
+                items: cappedMessages.items,
+                bytes: cappedMessages.bytes,
+                maxBytes: SESSIONS_HISTORY_MAX_BYTES,
+              });
+              return jsonResult({
+                sessionKey: displayKey,
+                source: "cc-jsonl",
+                messages: hardened.items,
+                truncated: droppedMessages || contentTruncated || hardened.hardCapped,
+                droppedMessages: droppedMessages || hardened.hardCapped,
+                contentTruncated,
+                contentRedacted,
+                bytes: hardened.bytes,
+              });
+            }
+          }
+          return jsonResult({
+            sessionKey: displayKey,
+            status: "error",
+            error: "CC session transcript not found",
+          });
+        }
+        return jsonResult({
+          sessionKey: displayKey,
+          status: "error",
+          error: "CC spawn session not found in subagent registry",
+        });
+      }
+
       const result = await callGateway<{ messages: Array<unknown> }>({
         method: "chat.history",
         params: { sessionKey: resolvedKey, limit },
