@@ -4,6 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { loadConfig } from "../../config/config.js";
 import { callGateway } from "../../gateway/call.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../../routing/session-key.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
@@ -13,8 +14,13 @@ import { selectSession } from "../claude-code/session-selection.js";
 import { resolveSession } from "../claude-code/sessions.js";
 import type { ClaudeCodePermissionMode } from "../claude-code/types.js";
 import { optionalStringEnum } from "../schema/typebox.js";
+import { resolveSubagentCompletionOrigin } from "../subagent-announce.js";
 import { markExternalSubagentRunComplete, registerSubagentRun } from "../subagent-registry.js";
-import { SUBAGENT_SPAWN_MODES, spawnSubagentDirect } from "../subagent-spawn.js";
+import {
+  SUBAGENT_SPAWN_MODES,
+  ensureThreadBindingForSubagentSpawn,
+  spawnSubagentDirect,
+} from "../subagent-spawn.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
 import {
@@ -224,6 +230,60 @@ export function createSessionsSpawnTool(opts?: {
           ccRepoPath: repoPath,
         });
 
+        // ── Thread binding for CC spawns ──
+        let ccThreadOrigin = normalizeDeliveryContext({
+          channel: opts?.agentChannel,
+          accountId: opts?.agentAccountId,
+          to: opts?.agentTo,
+          threadId: opts?.agentThreadId,
+        });
+        if (thread) {
+          const hookRunner = getGlobalHookRunner();
+          if (!hookRunner?.hasHooks("subagent_spawning")) {
+            return jsonResult({
+              status: "error",
+              error:
+                "thread=true is unavailable because no channel plugin registered subagent_spawning hooks.",
+            });
+          }
+          const bindResult = await ensureThreadBindingForSubagentSpawn({
+            hookRunner,
+            childSessionKey: ccChildSessionKey,
+            agentId: requesterAgentId,
+            label: label || `cc:${repoLabel}`,
+            mode: "run",
+            requesterSessionKey: requesterInternalKey,
+            requester: {
+              channel: ccThreadOrigin?.channel,
+              accountId: ccThreadOrigin?.accountId,
+              to: ccThreadOrigin?.to,
+              threadId: ccThreadOrigin?.threadId,
+            },
+          });
+          if (bindResult.status === "error") {
+            return jsonResult({
+              status: "error",
+              error: bindResult.error,
+            });
+          }
+          // Resolve the bound delivery target so progress/announce go to the thread
+          try {
+            const resolved = await resolveSubagentCompletionOrigin({
+              childSessionKey: ccChildSessionKey,
+              requesterSessionKey: requesterInternalKey,
+              requesterOrigin: ccThreadOrigin,
+              childRunId: spawnId,
+              spawnMode: "run",
+              expectsCompletionMessage: false,
+            });
+            if (resolved.origin) {
+              ccThreadOrigin = resolved.origin;
+            }
+          } catch {
+            // Best-effort: fall back to original origin
+          }
+        }
+
         void (async () => {
           try {
             const result = await spawnClaudeCode({
@@ -243,24 +303,18 @@ export function createSessionsSpawnTool(opts?: {
               onProgress: (event) => {
                 if (event.kind === "progress_summary") {
                   const reqSessionKey = opts?.agentSessionKey ?? "main";
-                  const progressOrigin = normalizeDeliveryContext({
-                    channel: opts?.agentChannel,
-                    accountId: opts?.agentAccountId,
-                    to: opts?.agentTo,
-                    threadId: opts?.agentThreadId,
-                  });
                   void callGateway({
                     method: "agent",
                     params: {
                       sessionKey: reqSessionKey,
                       message: `${event.summary}\n\nRelay this progress update to the user verbatim. Keep it brief.`,
                       deliver: true,
-                      channel: progressOrigin?.channel,
-                      accountId: progressOrigin?.accountId,
-                      to: progressOrigin?.to,
+                      channel: ccThreadOrigin?.channel,
+                      accountId: ccThreadOrigin?.accountId,
+                      to: ccThreadOrigin?.to,
                       threadId:
-                        progressOrigin?.threadId != null
-                          ? String(progressOrigin.threadId)
+                        ccThreadOrigin?.threadId != null
+                          ? String(ccThreadOrigin.threadId)
                           : undefined,
                       idempotencyKey: crypto.randomUUID(),
                     },
@@ -269,13 +323,6 @@ export function createSessionsSpawnTool(opts?: {
                   }).catch(() => {});
                 }
               },
-            });
-
-            const requesterOriginForAnnounce = normalizeDeliveryContext({
-              channel: opts?.agentChannel,
-              accountId: opts?.agentAccountId,
-              to: opts?.agentTo,
-              threadId: opts?.agentThreadId,
             });
 
             const statusText = result.success ? "completed successfully" : "finished with errors";
@@ -310,13 +357,11 @@ export function createSessionsSpawnTool(opts?: {
                 sessionKey: reqSessionKey,
                 message: announceMessage,
                 deliver: true,
-                channel: requesterOriginForAnnounce?.channel,
-                accountId: requesterOriginForAnnounce?.accountId,
-                to: requesterOriginForAnnounce?.to,
+                channel: ccThreadOrigin?.channel,
+                accountId: ccThreadOrigin?.accountId,
+                to: ccThreadOrigin?.to,
                 threadId:
-                  requesterOriginForAnnounce?.threadId != null
-                    ? String(requesterOriginForAnnounce.threadId)
-                    : undefined,
+                  ccThreadOrigin?.threadId != null ? String(ccThreadOrigin.threadId) : undefined,
                 idempotencyKey: crypto.randomUUID(),
               },
               expectFinal: true,
@@ -342,25 +387,17 @@ export function createSessionsSpawnTool(opts?: {
 
             try {
               const reqSessionKey = opts?.agentSessionKey ?? "main";
-              const requesterOriginForAnnounce = normalizeDeliveryContext({
-                channel: opts?.agentChannel,
-                accountId: opts?.agentAccountId,
-                to: opts?.agentTo,
-                threadId: opts?.agentThreadId,
-              });
               await callGateway({
                 method: "agent",
                 params: {
                   sessionKey: reqSessionKey,
                   message: `Claude Code task on [${repoLabel}] failed: ${errorMsg}\n\nInform the user about this failure.`,
                   deliver: true,
-                  channel: requesterOriginForAnnounce?.channel,
-                  accountId: requesterOriginForAnnounce?.accountId,
-                  to: requesterOriginForAnnounce?.to,
+                  channel: ccThreadOrigin?.channel,
+                  accountId: ccThreadOrigin?.accountId,
+                  to: ccThreadOrigin?.to,
                   threadId:
-                    requesterOriginForAnnounce?.threadId != null
-                      ? String(requesterOriginForAnnounce.threadId)
-                      : undefined,
+                    ccThreadOrigin?.threadId != null ? String(ccThreadOrigin.threadId) : undefined,
                   idempotencyKey: crypto.randomUUID(),
                 },
                 expectFinal: true,
@@ -380,6 +417,7 @@ export function createSessionsSpawnTool(opts?: {
           model: ccModel,
           permissionMode,
           timeoutSeconds: ccTimeout,
+          thread,
         });
       }
 

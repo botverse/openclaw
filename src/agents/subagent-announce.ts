@@ -472,7 +472,7 @@ function resolveAnnounceOrigin(
   return mergeDeliveryContext(normalizedRequester, entryForMerge);
 }
 
-async function resolveSubagentCompletionOrigin(params: {
+export async function resolveSubagentCompletionOrigin(params: {
   childSessionKey: string;
   requesterSessionKey: string;
   requesterOrigin?: DeliveryContext;

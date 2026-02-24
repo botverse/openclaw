@@ -98,7 +98,7 @@ function summarizeError(err: unknown): string {
   return "error";
 }
 
-async function ensureThreadBindingForSubagentSpawn(params: {
+export async function ensureThreadBindingForSubagentSpawn(params: {
   hookRunner: ReturnType<typeof getGlobalHookRunner>;
   childSessionKey: string;
   agentId: string;
