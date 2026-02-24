@@ -984,6 +984,28 @@ function findRunIdsByChildSessionKey(childSessionKey: string): string[] {
   return findRunIdsByChildSessionKeyFromRuns(subagentRuns, childSessionKey);
 }
 
+/**
+ * Look up the subagent run record for a given child session key.
+ * Returns the most recent active (or latest) run matching that key.
+ */
+export function findSubagentRunByChildSessionKey(
+  childSessionKey: string,
+): SubagentRunRecord | null {
+  const runIds = findRunIdsByChildSessionKey(childSessionKey);
+  let best: SubagentRunRecord | null = null;
+  for (const runId of runIds) {
+    const entry = subagentRuns.get(runId);
+    if (!entry) {
+      continue;
+    }
+    // Prefer active (no endedAt) over ended; among same status, prefer newest.
+    if (!best || (!entry.endedAt && best.endedAt) || entry.createdAt > best.createdAt) {
+      best = entry;
+    }
+  }
+  return best;
+}
+
 export function resolveRequesterForChildSession(childSessionKey: string): {
   requesterSessionKey: string;
   requesterOrigin?: DeliveryContext;

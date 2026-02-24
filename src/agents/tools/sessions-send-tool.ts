@@ -8,7 +8,9 @@ import {
   type GatewayMessageChannel,
   INTERNAL_MESSAGE_CHANNEL,
 } from "../../utils/message-channel.js";
+import { sendFollowUp } from "../claude-code/runner.js";
 import { AGENT_LANE_NESTED } from "../lanes.js";
+import { findSubagentRunByChildSessionKey } from "../subagent-registry.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
 import {
@@ -210,6 +212,35 @@ export function createSessionsSendTool(opts?: {
           runId: crypto.randomUUID(),
           status: access.status,
           error: access.error,
+          sessionKey: displayKey,
+        });
+      }
+
+      // ── CC spawn shortcut: route directly to CC stdin ──
+      const CC_SPAWN_PATTERN = /^agent:[^:]+:cc-spawn:/;
+      if (CC_SPAWN_PATTERN.test(resolvedKey)) {
+        const run = findSubagentRunByChildSessionKey(resolvedKey);
+        if (run?.ccRepoPath) {
+          const sent = sendFollowUp(run.ccRepoPath, message);
+          if (sent) {
+            return jsonResult({
+              runId: crypto.randomUUID(),
+              status: "ok",
+              sessionKey: displayKey,
+              delivery: { status: "sent", mode: "cc-stdin" },
+            });
+          }
+          return jsonResult({
+            runId: crypto.randomUUID(),
+            status: "error",
+            error: "CC session is not running or stdin not writable",
+            sessionKey: displayKey,
+          });
+        }
+        return jsonResult({
+          runId: crypto.randomUUID(),
+          status: "error",
+          error: "CC spawn session not found in subagent registry or missing repo path",
           sessionKey: displayKey,
         });
       }
