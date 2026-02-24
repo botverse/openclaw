@@ -111,6 +111,11 @@ function resolveSubagentRunOrphanReason(params: {
   if (!childSessionKey) {
     return "missing-session-entry";
   }
+  // Claude Code spawns are external processes — they don't have gateway session entries.
+  // Skip orphan detection for them to avoid false pruning.
+  if (params.entry.ccRepoPath) {
+    return null;
+  }
   try {
     const cfg = loadConfig();
     const agentId = resolveAgentIdFromSessionKey(childSessionKey);
@@ -400,6 +405,19 @@ function resumeSubagentRun(runId: string) {
     if (!startSubagentAnnounceCleanupFlow(runId, entry)) {
       return;
     }
+    resumedRuns.add(runId);
+    return;
+  }
+
+  // Claude Code spawns are external child processes — after gateway restart,
+  // they're gone. Mark as failed instead of trying to wait via gateway RPC.
+  if (entry.ccRepoPath) {
+    entry.endedAt = Date.now();
+    entry.outcome = { status: "error", error: "CC process lost (gateway restart)" };
+    entry.endedReason = SUBAGENT_ENDED_REASON_ERROR;
+    entry.cleanupHandled = true;
+    entry.cleanupCompletedAt = Date.now();
+    persistSubagentRuns();
     resumedRuns.add(runId);
     return;
   }
@@ -821,6 +839,10 @@ export function registerSubagentRun(params: {
   runTimeoutSeconds?: number;
   expectsCompletionMessage?: boolean;
   spawnMode?: "run" | "session";
+  /** Skip gateway wait — for external processes (e.g. Claude Code) that manage their own completion. */
+  skipGatewayWait?: boolean;
+  /** For Claude Code spawns: the resolved repo path for follow-up routing. */
+  ccRepoPath?: string;
 }) {
   const now = Date.now();
   const cfg = loadConfig();
@@ -848,15 +870,18 @@ export function registerSubagentRun(params: {
     startedAt: now,
     archiveAtMs,
     cleanupHandled: false,
+    ccRepoPath: params.ccRepoPath,
   });
   ensureListener();
   persistSubagentRuns();
   if (archiveAtMs) {
     startSweeper();
   }
-  // Wait for subagent completion via gateway RPC (cross-process).
-  // The in-process lifecycle listener is a fallback for embedded runs.
-  void waitForSubagentCompletion(params.runId, waitTimeoutMs);
+  if (!params.skipGatewayWait) {
+    // Wait for subagent completion via gateway RPC (cross-process).
+    // The in-process lifecycle listener is a fallback for embedded runs.
+    void waitForSubagentCompletion(params.runId, waitTimeoutMs);
+  }
 }
 
 async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
@@ -1073,6 +1098,32 @@ export function listDescendantRunsForRequester(rootSessionKey: string): Subagent
     getSubagentRunsSnapshotForRead(subagentRuns),
     rootSessionKey,
   );
+}
+
+/**
+ * Mark an externally-managed subagent run as complete (e.g. Claude Code spawn).
+ * Use this when the external process handles its own announce/delivery.
+ * This only updates the registry bookkeeping (endedAt, outcome, cleanup).
+ */
+export function markExternalSubagentRunComplete(params: {
+  runId: string;
+  outcome: SubagentRunOutcome;
+  endedAt?: number;
+}) {
+  const entry = subagentRuns.get(params.runId);
+  if (!entry) {
+    return;
+  }
+  const now = params.endedAt ?? Date.now();
+  entry.endedAt = now;
+  entry.outcome = params.outcome;
+  entry.endedReason =
+    params.outcome.status === "error"
+      ? SUBAGENT_ENDED_REASON_ERROR
+      : SUBAGENT_ENDED_REASON_COMPLETE;
+  entry.cleanupHandled = true;
+  entry.cleanupCompletedAt = now;
+  persistSubagentRuns();
 }
 
 export function initSubagentRegistry() {

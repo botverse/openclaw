@@ -25,6 +25,8 @@ import {
   truncateLine,
 } from "../../shared/subagents-format.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
+import { killClaudeCode } from "../claude-code/live-state.js";
+import { sendFollowUp } from "../claude-code/runner.js";
 import { AGENT_LANE_SUBAGENT } from "../lanes.js";
 import { abortEmbeddedPiRun } from "../pi-embedded.js";
 import { optionalStringEnum } from "../schema/typebox.js";
@@ -234,6 +236,16 @@ async function killSubagentRun(params: {
 }): Promise<{ killed: boolean; sessionId?: string }> {
   if (params.entry.endedAt) {
     return { killed: false };
+  }
+  // Claude Code spawn: kill via CC process management
+  if (params.entry.ccRepoPath) {
+    const ccKilled = killClaudeCode(params.entry.ccRepoPath);
+    const marked = markSubagentRunTerminated({
+      runId: params.entry.runId,
+      childSessionKey: params.entry.childSessionKey,
+      reason: "killed",
+    });
+    return { killed: ccKilled || marked > 0 };
   }
   const childSessionKey = params.entry.childSessionKey;
   const resolved = resolveSessionEntryForKey({
@@ -575,6 +587,31 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
           });
         }
         steerRateLimit.set(rateKey, now);
+
+        // Claude Code spawn: route steer as a follow-up message via CC stdin
+        if (resolved.entry.ccRepoPath) {
+          const sent = sendFollowUp(resolved.entry.ccRepoPath, message);
+          if (!sent) {
+            return jsonResult({
+              status: "error",
+              action: "steer",
+              target,
+              runId: resolved.entry.runId,
+              sessionKey: resolved.entry.childSessionKey,
+              error: "Claude Code session is not running or stdin is not writable.",
+            });
+          }
+          return jsonResult({
+            status: "accepted",
+            action: "steer",
+            target,
+            runId: resolved.entry.runId,
+            sessionKey: resolved.entry.childSessionKey,
+            mode: "follow-up",
+            label: resolveSubagentLabel(resolved.entry),
+            text: `steered ${resolveSubagentLabel(resolved.entry)} (follow-up sent to CC stdin).`,
+          });
+        }
 
         // Suppress announce for the interrupted run before aborting so we don't
         // emit stale pre-steer findings if the run exits immediately.

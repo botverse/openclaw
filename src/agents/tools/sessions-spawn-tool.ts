@@ -13,9 +13,15 @@ import { selectSession } from "../claude-code/session-selection.js";
 import { resolveSession } from "../claude-code/sessions.js";
 import type { ClaudeCodePermissionMode } from "../claude-code/types.js";
 import { optionalStringEnum } from "../schema/typebox.js";
+import { markExternalSubagentRunComplete, registerSubagentRun } from "../subagent-registry.js";
 import { SUBAGENT_SPAWN_MODES, spawnSubagentDirect } from "../subagent-spawn.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
+import {
+  resolveDisplaySessionKey,
+  resolveInternalSessionKey,
+  resolveMainSessionAlias,
+} from "./sessions-helpers.js";
 
 const log = createSubsystemLogger("agents/sessions-spawn");
 
@@ -180,6 +186,44 @@ export function createSessionsSpawnTool(opts?: {
         const repoLabel = repoParam || path.basename(repoPath);
         const taskLabel = label || task;
 
+        // Register with subagent registry for tracking (subagents list/steer/kill)
+        const ccChildSessionKey = `agent:${requesterAgentId}:cc-spawn:${spawnId}`;
+        const requesterOriginForRegistry = normalizeDeliveryContext({
+          channel: opts?.agentChannel,
+          accountId: opts?.agentAccountId,
+          to: opts?.agentTo,
+          threadId: opts?.agentThreadId,
+        });
+        const { mainKey, alias } = resolveMainSessionAlias(cfg);
+        const requesterSessionKey = opts?.agentSessionKey ?? alias;
+        const requesterInternalKey = resolveInternalSessionKey({
+          key: requesterSessionKey,
+          alias,
+          mainKey,
+        });
+        const requesterDisplayKey = resolveDisplaySessionKey({
+          key: requesterInternalKey,
+          alias,
+          mainKey,
+        });
+
+        registerSubagentRun({
+          runId: spawnId,
+          childSessionKey: ccChildSessionKey,
+          requesterSessionKey: requesterInternalKey,
+          requesterOrigin: requesterOriginForRegistry,
+          requesterDisplayKey,
+          task,
+          cleanup: "keep",
+          label: label || `cc:${repoLabel}`,
+          model: ccModel ?? undefined,
+          runTimeoutSeconds: ccTimeout,
+          expectsCompletionMessage: false,
+          spawnMode: "run",
+          skipGatewayWait: true,
+          ccRepoPath: repoPath,
+        });
+
         void (async () => {
           try {
             const result = await spawnClaudeCode({
@@ -278,9 +322,24 @@ export function createSessionsSpawnTool(opts?: {
               expectFinal: true,
               timeoutMs: 60_000,
             });
+
+            // Mark run complete in subagent registry
+            markExternalSubagentRunComplete({
+              runId: spawnId,
+              outcome: result.success
+                ? { status: "ok" }
+                : { status: "error", error: result.errors.join(", ") || "finished with errors" },
+            });
           } catch (err) {
             const errorMsg =
               err instanceof Error ? err.message : typeof err === "string" ? err : "unknown error";
+
+            // Mark run as failed in subagent registry
+            markExternalSubagentRunComplete({
+              runId: spawnId,
+              outcome: { status: "error", error: errorMsg },
+            });
+
             try {
               const reqSessionKey = opts?.agentSessionKey ?? "main";
               const requesterOriginForAnnounce = normalizeDeliveryContext({
