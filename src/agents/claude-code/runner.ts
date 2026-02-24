@@ -296,7 +296,19 @@ async function executeSpawn(options: ClaudeCodeSpawnOptions): Promise<ClaudeCode
   const startedAt = Date.now();
   const ndjsonLog = createNdjsonLogger(repoPath);
 
-  // 7. Send initial task on stdin — keep stdin OPEN for multi-turn
+  // 7a. Send SDK initialize handshake — required by CC v2.1.50+
+  // Without this, CC silently ignores user messages in stream-json mode.
+  const initRequest = JSON.stringify({
+    type: "control_request",
+    request_id: crypto.randomUUID(),
+    request: { subtype: "initialize" },
+  });
+  child.stdin.write(initRequest + "\n");
+  ndjsonLog.logStdin(initRequest);
+  log.info(`control_request initialize sent, pid=${child.pid}`);
+
+  // 7b. Send initial task on stdin — keep stdin OPEN for multi-turn
+  // CC processes stdin in order: initialize will be handled before this message.
   // When resuming, prepend previous session context so CC knows what happened
   let taskContent = options.task;
   if (sessionContext) {
