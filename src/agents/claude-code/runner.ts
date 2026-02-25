@@ -518,6 +518,10 @@ async function executeSpawn(options: ClaudeCodeSpawnOptions): Promise<ClaudeCode
     // CCProcess will kill the process; the exit handler above will resolve/reject.
   });
 
+  cc.on("media", (media: { kind: string; media_type: string; data: string }) => {
+    options.onProgress?.({ kind: "media", media });
+  });
+
   cc.on("api_error", (event: { error: { message?: string; status?: number } }) => {
     log.warn(`CC API error: ${event.error.message ?? "unknown"} (status ${event.error.status})`);
   });

@@ -121,7 +121,8 @@ export type ClaudeCodeProgressEvent =
   | { kind: "auth_error"; error: string }
   | { kind: "progress_summary"; summary: string }
   | { kind: "permission_request"; toolName: string; description: string; requestId: string }
-  | { kind: "result"; result: ClaudeCodeResult };
+  | { kind: "result"; result: ClaudeCodeResult }
+  | { kind: "media"; media: { kind: string; media_type: string; data: string } };
 
 // ---------------------------------------------------------------------------
 // Result
