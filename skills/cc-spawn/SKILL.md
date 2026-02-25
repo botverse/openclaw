@@ -21,9 +21,9 @@ Delegate coding tasks to Claude Code through OpenClaw's `sessions_spawn` tool. C
 **Do NOT use CC spawn for:**
 
 - Reading code (use the `read` tool directly)
-- Simple one-line edits (use the `edit` tool)
 - Tasks outside a git repo
-- Work in the `~/clawd` workspace (never spawn CC here)
+
+**Always specify the correct `repo`** — CC must launch in the relevant project directory, not a home directory or unrelated path.
 
 ## How to Spawn
 
