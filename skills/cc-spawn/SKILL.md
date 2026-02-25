@@ -79,13 +79,13 @@ OpenClaw automatically decides whether to resume an existing session or start fr
 
 **How it works:** A 5-factor scoring model evaluates all existing sessions for the repo:
 
-| Factor           | Weight        | What it checks                                                                                                    |
-| ---------------- | ------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Branch match     | 0.25          | Is the session on the same git branch?                                                                            |
-| Recency          | 0-0.20        | How recently was the session active? (exponential decay)                                                          |
-| Task relevance   | -0.15 to 0.25 | How related is the new task to the session's previous work? (LLM-scored via Haiku, falls back to keyword overlap) |
-| Session health   | 0-0.15        | Is the session too large or old?                                                                                  |
-| Context capacity | 0-0.15        | Has the session been compacted? Budget remaining?                                                                 |
+| Factor           | Weight        | What it checks                                                                                                                          |
+| ---------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Branch match     | 0.25          | Is the session on the same git branch?                                                                                                  |
+| Recency          | 0-0.20        | How recently was the session active? (exponential decay)                                                                                |
+| Task relevance   | -0.15 to 0.25 | How related is the new task to the session's previous work? (keyword overlap; LLM-scored via Haiku if `ANTHROPIC_API_KEY` is available) |
+| Session health   | 0-0.15        | Is the session too large or old?                                                                                                        |
+| Context capacity | 0-0.15        | Has the session been compacted? Budget remaining?                                                                                       |
 
 **Score ≥ 0.6** → resume that session. **Below 0.6** → start fresh.
 
