@@ -73,6 +73,41 @@ Include:
 - Expected behavior
 - Any constraints (don't change X, use library Y)
 
+## Session Intelligence
+
+OpenClaw automatically decides whether to resume an existing session or start fresh. You don't need to manage this — just spawn with a task and repo.
+
+**How it works:** A 5-factor scoring model evaluates all existing sessions for the repo:
+
+| Factor           | Weight        | What it checks                                                                                                    |
+| ---------------- | ------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Branch match     | 0.25          | Is the session on the same git branch?                                                                            |
+| Recency          | 0-0.20        | How recently was the session active? (exponential decay)                                                          |
+| Task relevance   | -0.15 to 0.25 | How related is the new task to the session's previous work? (LLM-scored via Haiku, falls back to keyword overlap) |
+| Session health   | 0-0.15        | Is the session too large or old?                                                                                  |
+| Context capacity | 0-0.15        | Has the session been compacted? Budget remaining?                                                                 |
+
+**Score ≥ 0.6** → resume that session. **Below 0.6** → start fresh.
+
+**Hard ceilings** (always start fresh):
+
+- 3+ context compactions
+- 70%+ budget consumed
+- Unrelated task + 200+ messages
+
+**Labels override scoring** — if you pass `label`, it does a direct lookup instead of scoring:
+
+```
+sessions_spawn(
+  task: "Continue the auth refactor",
+  repo: "/home/user/myproject",
+  label: "auth-refactor",
+  mode: "run"
+)
+```
+
+Use labels when you know you want to continue specific work. Otherwise let the scoring decide.
+
 ## Completion
 
 CC spawn is push-based — when CC finishes, the result auto-delivers to your chat. **Do not poll** `subagents list` or `sessions_list` in a loop. Only check status on-demand if asked.
