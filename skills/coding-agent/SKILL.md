@@ -1,6 +1,6 @@
 ---
 name: coding-agent
-description: "Delegate coding tasks to Codex, Claude Code, or Pi agents via background process. Use when: (1) building/creating new features or apps, (2) reviewing PRs (spawn in temp dir), (3) refactoring large codebases, (4) iterative coding that needs file exploration. NOT for: simple one-liner fixes (just edit), reading code (use read tool), or any work in ~/clawd workspace (never spawn agents here). Requires a bash tool that supports pty:true."
+description: "Delegate coding tasks to Codex, Pi, or other CLI agents via background bash process. Use when: (1) using Codex, Pi, or OpenCode specifically, (2) reviewing PRs in temp dirs, (3) batch parallel work with git worktrees. For Claude Code tasks, prefer the cc-spawn skill (sessions_spawn) which has better integration. NOT for: simple one-liner fixes (just edit), reading code (use read tool), or any work in ~/clawd workspace (never spawn agents here). Requires a bash tool that supports pty:true."
 metadata:
   {
     "openclaw": { "emoji": "🧩", "requires": { "anyBins": ["claude", "codex", "opencode", "pi"] } },
