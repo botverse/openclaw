@@ -40,6 +40,11 @@ import {
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
 import { resolveInternalSessionKey, resolveMainSessionAlias } from "./sessions-helpers.js";
+import {
+  getTgccSupervisorClient,
+  getTgccAgentMappings,
+
+} from "../tgcc-supervisor/index.js";
 
 const SUBAGENT_ACTIONS = ["list", "kill", "steer"] as const;
 type SubagentAction = (typeof SUBAGENT_ACTIONS)[number];
@@ -404,7 +409,31 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
             buildListEntry(entry, (entry.endedAt ?? now) - (entry.startedAt ?? entry.createdAt)),
           );
 
+        // Append TGCC agent info to list entries
+        const tgccMappings = getTgccAgentMappings();
+        for (const entry of [...active, ...recent]) {
+          const run = runs.find((r) => r.runId === entry.view.runId);
+          if (run?.transport === "tgcc-supervisor") {
+            entry.line = entry.line.replace(/^(\d+\.)/, "$1 [tgcc]");
+            (entry.view as Record<string, unknown>).transport = "tgcc-supervisor";
+          }
+        }
+
+        // Show TGCC agents that have active CC processes but no tracked subagent run
+        const trackedTgccAgents = new Set(
+          runs.filter((r) => r.tgccAgentId).map((r) => r.tgccAgentId!),
+        );
+        const tgccLines: string[] = [];
+        for (const [agentId, mapping] of Object.entries(tgccMappings)) {
+          if (trackedTgccAgents.has(agentId)) {continue;}
+          if (mapping.state !== "active") {continue;}
+          tgccLines.push(`  [tgcc] ${agentId} (${mapping.type ?? "persistent"}, active)`);
+        }
+
         const text = buildListText({ active, recent, recentMinutes });
+        const fullText = tgccLines.length > 0
+          ? `${text}\n\ntgcc agents (untracked):\n${tgccLines.join("\n")}`
+          : text;
         return jsonResult({
           status: "ok",
           action: "list",
@@ -414,7 +443,8 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
           total: runs.length,
           active: active.map((entry) => entry.view),
           recent: recent.map((entry) => entry.view),
-          text,
+          tgccAgents: Object.keys(tgccMappings),
+          text: fullText,
         });
       }
 
@@ -471,6 +501,43 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
             error: resolved.error ?? "Unknown subagent target.",
           });
         }
+        // Route TGCC-backed kills through the supervisor protocol
+        if (resolved.entry.transport === "tgcc-supervisor" && resolved.entry.tgccAgentId) {
+          const tgccClient = getTgccSupervisorClient();
+          if (!tgccClient?.isConnected()) {
+            return jsonResult({
+              status: "error",
+              action: "kill",
+              target,
+              error: "TGCC supervisor not connected.",
+            });
+          }
+          try {
+            await tgccClient.killCC(resolved.entry.tgccAgentId);
+            markSubagentRunTerminated({
+              runId: resolved.entry.runId,
+              reason: "killed via tgcc supervisor",
+            });
+            return jsonResult({
+              status: "ok",
+              action: "kill",
+              target,
+              runId: resolved.entry.runId,
+              sessionKey: resolved.entry.childSessionKey,
+              label: resolveSubagentLabel(resolved.entry),
+              text: `killed [tgcc] ${resolveSubagentLabel(resolved.entry)}.`,
+            });
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            return jsonResult({
+              status: "error",
+              action: "kill",
+              target,
+              error: `TGCC kill_cc failed: ${errMsg}`,
+            });
+          }
+        }
+
         const killCache = new Map<string, Record<string, SessionEntry>>();
         const stopResult = await killSubagentRun({
           cfg,
@@ -575,6 +642,39 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
           });
         }
         steerRateLimit.set(rateKey, now);
+
+        // Route TGCC-backed steers through the supervisor protocol
+        if (resolved.entry.transport === "tgcc-supervisor" && resolved.entry.tgccAgentId) {
+          const tgccClient = getTgccSupervisorClient();
+          if (!tgccClient?.isConnected()) {
+            return jsonResult({
+              status: "error",
+              action: "steer",
+              target,
+              error: "TGCC supervisor not connected.",
+            });
+          }
+          try {
+            await tgccClient.sendToCC(resolved.entry.tgccAgentId, message);
+            return jsonResult({
+              status: "accepted",
+              action: "steer",
+              target,
+              runId: resolved.entry.runId,
+              sessionKey: resolved.entry.childSessionKey,
+              label: resolveSubagentLabel(resolved.entry),
+              text: `steered [tgcc] ${resolveSubagentLabel(resolved.entry)}.`,
+            });
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            return jsonResult({
+              status: "error",
+              action: "steer",
+              target,
+              error: `TGCC send_to_cc failed: ${errMsg}`,
+            });
+          }
+        }
 
         // Suppress announce for the interrupted run before aborting so we don't
         // emit stale pre-steer findings if the run exits immediately.

@@ -23,6 +23,12 @@ import {
 } from "./sessions-helpers.js";
 import { buildAgentToAgentMessageContext, resolvePingPongTurns } from "./sessions-send-helpers.js";
 import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
+import {
+  getTgccSupervisorClient,
+  isTgccAgent,
+  buildTgccChildSessionKey,
+} from "../tgcc-supervisor/index.js";
+import { registerSubagentRun, listSubagentRunsForRequester } from "../subagent-registry.js";
 
 const SessionsSendToolSchema = Type.Object({
   sessionKey: Type.Optional(Type.String()),
@@ -69,6 +75,61 @@ export function createSessionsSendTool(opts?: {
           status: "error",
           error: "Provide either sessionKey or label (not both).",
         });
+      }
+
+      // ── TGCC agent interception ─────────────────────────────────────
+      // If the target matches a known TGCC agent, route through the supervisor
+      // protocol instead of the normal session resolution flow.
+      const tgccTarget = labelParam ?? sessionKeyParam;
+      if (tgccTarget && isTgccAgent(tgccTarget)) {
+        const tgccClient = getTgccSupervisorClient();
+        if (!tgccClient?.isConnected()) {
+          return jsonResult({
+            runId: crypto.randomUUID(),
+            status: "error",
+            error: `TGCC supervisor not connected. Cannot reach agent "${tgccTarget}".`,
+          });
+        }
+        try {
+          const result = await tgccClient.sendMessage(tgccTarget, message, { subscribe: true });
+          const childKey = buildTgccChildSessionKey(tgccTarget);
+          const runId = crypto.randomUUID();
+          registerSubagentRun({
+            runId,
+            childSessionKey: childKey,
+            requesterSessionKey: effectiveRequesterKey,
+            requesterDisplayKey: effectiveRequesterKey,
+            task: message.slice(0, 200),
+            cleanup: "keep",
+            label: tgccTarget,
+            spawnMode: "run",
+            expectsCompletionMessage: false,
+          });
+          // Patch the run with TGCC transport info
+          const runs = listSubagentRunsForRequester(effectiveRequesterKey);
+          const tgccRun = runs.find((r) => r.runId === runId);
+          if (tgccRun) {
+            tgccRun.transport = "tgcc-supervisor";
+            tgccRun.tgccAgentId = tgccTarget;
+          }
+          return jsonResult({
+            runId,
+            status: "accepted",
+            sessionKey: childKey,
+            tgccAgent: tgccTarget,
+            sessionId: result.sessionId,
+            state: result.state,
+            delivery: { status: "pending", mode: "tgcc-supervisor" },
+            text: `Message sent to TGCC agent "${tgccTarget}". Results will be announced when CC completes.`,
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return jsonResult({
+            runId: crypto.randomUUID(),
+            status: "error",
+            error: `TGCC send_message failed: ${errMsg}`,
+          });
+        }
       }
 
       let sessionKey = sessionKeyParam;

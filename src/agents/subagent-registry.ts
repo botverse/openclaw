@@ -1162,6 +1162,48 @@ export function listDescendantRunsForRequester(rootSessionKey: string): Subagent
   );
 }
 
+export function findSubagentRunByChildSessionKey(
+  childSessionKey: string,
+): SubagentRunRecord | null {
+  const runIds = findRunIdsByChildSessionKey(childSessionKey);
+  for (const runId of runIds) {
+    const entry = subagentRuns.get(runId);
+    if (entry && typeof entry.endedAt !== "number") {
+      return entry;
+    }
+  }
+  // Fall back to any run (even ended) for correlation.
+  for (const runId of runIds) {
+    const entry = subagentRuns.get(runId);
+    if (entry) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+export function markExternalSubagentRunComplete(params: {
+  runId: string;
+  outcome: SubagentRunOutcome;
+  endedAt?: number;
+}): void {
+  const entry = subagentRuns.get(params.runId);
+  if (!entry) {return;}
+
+  const endedAt = typeof params.endedAt === "number" ? params.endedAt : Date.now();
+  void completeSubagentRun({
+    runId: params.runId,
+    endedAt,
+    outcome: params.outcome,
+    reason: params.outcome.status === "error"
+      ? SUBAGENT_ENDED_REASON_ERROR
+      : SUBAGENT_ENDED_REASON_COMPLETE,
+    sendFarewell: true,
+    accountId: entry.requesterOrigin?.accountId,
+    triggerCleanup: true,
+  });
+}
+
 export function initSubagentRegistry() {
   restoreSubagentRunsOnce();
 }

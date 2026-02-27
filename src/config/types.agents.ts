@@ -26,6 +26,11 @@ export type AgentConfig = {
     allowAgents?: string[];
     /** Per-agent default model for spawned sub-agents (string or {primary,fallbacks}). */
     model?: AgentModelConfig;
+    /** Claude Code settings for this agent. */
+    claudeCode?: {
+      defaultRepo?: string;
+      repos?: Record<string, string>;
+    };
   };
   /** Optional per-agent sandbox overrides. */
   sandbox?: AgentSandboxConfig;

@@ -263,6 +263,34 @@ export type AgentDefaultsConfig = {
     runTimeoutSeconds?: number;
     /** Gateway timeout in ms for sub-agent announce delivery calls (default: 60000). */
     announceTimeoutMs?: number;
+    /** Claude Code process management via TGCC bridge. */
+    claudeCode?: {
+      /** Whether Claude Code spawning is enabled. */
+      enabled?: boolean;
+      /** Map of repo name → absolute path for CC-managed repos. */
+      repos?: Record<string, string>;
+      /** Maximum budget in USD per CC session. */
+      maxBudgetUsd?: number;
+      /** Timeout in seconds for CC sessions. */
+      timeoutSeconds?: number;
+      /** Permission mode for CC sessions (e.g. "bypassPermissions"). */
+      permissionMode?: string;
+      /** TGCC supervisor protocol configuration. */
+      tgccSupervisor?: {
+        /** Path to the TGCC Unix socket. */
+        socket: string;
+        /** Attempt to start TGCC via systemd on first connection failure. */
+        autoStart?: boolean;
+        /** systemd service name (default: "tgcc"). */
+        serviceName?: string;
+        /** Initial reconnect delay in ms (default: 1000). */
+        reconnectInitialMs?: number;
+        /** Maximum reconnect delay in ms (default: 30000). */
+        reconnectMaxMs?: number;
+        /** Heartbeat interval in ms (default: 30000). */
+        heartbeatMs?: number;
+      };
+    };
   };
   /** Optional sandbox settings for non-main sessions. */
   sandbox?: AgentSandboxConfig;

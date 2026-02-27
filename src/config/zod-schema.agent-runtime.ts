@@ -699,6 +699,13 @@ export const AgentEntrySchema = z
           ])
           .optional(),
         thinking: z.string().optional(),
+        claudeCode: z
+          .object({
+            defaultRepo: z.string().optional(),
+            repos: z.record(z.string(), z.string()).optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

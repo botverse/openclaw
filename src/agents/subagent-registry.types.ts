@@ -32,4 +32,8 @@ export type SubagentRunRecord = {
   endedReason?: SubagentLifecycleEndedReason;
   /** Set after the subagent_ended hook has been emitted successfully once. */
   endedHookEmittedAt?: number;
+  /** Transport type for externally-managed runs (e.g. "tgcc-supervisor"). */
+  transport?: string;
+  /** TGCC agent ID for runs managed via the TGCC supervisor protocol. */
+  tgccAgentId?: string;
 };

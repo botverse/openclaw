@@ -160,6 +160,27 @@ export const AgentDefaultsSchema = z
         thinking: z.string().optional(),
         runTimeoutSeconds: z.number().int().min(0).optional(),
         announceTimeoutMs: z.number().int().positive().optional(),
+        claudeCode: z
+          .object({
+            enabled: z.boolean().optional(),
+            repos: z.record(z.string(), z.string()).optional(),
+            maxBudgetUsd: z.number().positive().optional(),
+            timeoutSeconds: z.number().int().positive().optional(),
+            permissionMode: z.string().optional(),
+            tgccSupervisor: z
+              .object({
+                socket: z.string().default("/tmp/tgcc/ctl/tgcc.sock"),
+                autoStart: z.boolean().optional(),
+                serviceName: z.string().optional(),
+                reconnectInitialMs: z.number().int().positive().optional(),
+                reconnectMaxMs: z.number().int().positive().optional(),
+                heartbeatMs: z.number().int().positive().optional(),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

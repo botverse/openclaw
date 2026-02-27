@@ -9,6 +9,7 @@ import { resolveAgentConfig } from "../agent-scope.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult } from "./common.js";
 import { resolveInternalSessionKey, resolveMainSessionAlias } from "./sessions-helpers.js";
+import { getTgccAgentMappings } from "../tgcc-supervisor/index.js";
 
 const AgentsListToolSchema = Type.Object({});
 
@@ -88,10 +89,23 @@ export function createAgentsListTool(opts?: {
         configured: configuredIds.includes(id),
       }));
 
+      // Append TGCC agents (reachable via sessions_send, not sessions_spawn)
+      const tgccMappings = getTgccAgentMappings();
+      const tgccAgents: Array<{ id: string; type: string; state: string; repo: string }> = [];
+      for (const [id, mapping] of Object.entries(tgccMappings)) {
+        tgccAgents.push({
+          id,
+          type: mapping.type ?? "persistent",
+          state: mapping.state ?? "idle",
+          repo: mapping.repo,
+        });
+      }
+
       return jsonResult({
         requester: requesterAgentId,
         allowAny,
         agents,
+        tgccAgents: tgccAgents.length > 0 ? tgccAgents : undefined,
       });
     },
   };

@@ -24,6 +24,7 @@ import {
 import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
 import { resolveAgentDir } from "../agent-scope.js";
 import { formatUserTime, resolveUserTimeFormat, resolveUserTimezone } from "../date-time.js";
+import { getTgccHealthStatus } from "../tgcc-supervisor/index.js";
 import { resolveModelAuthLabel } from "../model-auth-label.js";
 import { loadModelCatalog } from "../model-catalog.js";
 import {
@@ -384,13 +385,24 @@ export function createSessionStatusTool(opts?: {
         includeTranscriptUsage: true,
       });
 
+      // Append TGCC supervisor status
+      const tgccHealth = getTgccHealthStatus();
+      let fullStatusText = statusText;
+      if (tgccHealth.configured) {
+        const tgccLine = tgccHealth.connected
+          ? `🔌 TGCC: connected (${tgccHealth.agentCount ?? 0} agents)`
+          : `🔌 TGCC: ${tgccHealth.reconnecting ? "reconnecting" : "disconnected"}`;
+        fullStatusText = `${statusText}\n${tgccLine}`;
+      }
+
       return {
-        content: [{ type: "text", text: statusText }],
+        content: [{ type: "text", text: fullStatusText }],
         details: {
           ok: true,
           sessionKey: resolved.key,
           changedModel,
-          statusText,
+          statusText: fullStatusText,
+          tgccHealth: tgccHealth.configured ? tgccHealth : undefined,
         },
       };
     },
