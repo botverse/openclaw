@@ -503,7 +503,6 @@ function handleObservabilityEvent(event: Record<string, unknown>): void {
   // No tracked subagent run — persistent agent not spawned by OpenClaw.
   // Deliver to main session. Only wake agent for cc_message (explicit notify_parent).
   const eventName = String(event.event ?? "");
-  const shouldWake = eventName === "cc_message";
   const cfg = loadConfig();
   const mainKey = cfg.session?.mainKey ?? "agent:main:main";
   void callGateway({
@@ -512,7 +511,7 @@ function handleObservabilityEvent(event: Record<string, unknown>): void {
       sessionKey: mainKey,
       idempotencyKey: crypto.randomUUID(),
       message: `[System Event] ${message}`,
-      deliver: shouldWake,
+      deliver: true,
     },
     timeoutMs: 10_000,
   }).catch((err: unknown) => {
@@ -535,7 +534,7 @@ async function injectObservabilityMessage(
         sessionKey: run.requesterSessionKey,
         idempotencyKey: crypto.randomUUID(),
         message: `[System Event] ${message}`,
-        deliver: false,
+        deliver: true,
       },
       timeoutMs: 10_000,
     });
