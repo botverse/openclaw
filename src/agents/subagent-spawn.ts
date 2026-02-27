@@ -15,8 +15,14 @@ import { AGENT_LANE_SUBAGENT } from "./lanes.js";
 import { resolveSubagentSpawnModelSelection } from "./model-selection.js";
 import { buildSubagentSystemPrompt } from "./subagent-announce.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
-import { countActiveRunsForSession, registerSubagentRun } from "./subagent-registry.js";
+import { countActiveRunsForSession, listSubagentRunsForRequester, registerSubagentRun } from "./subagent-registry.js";
 import { readStringParam } from "./tools/common.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
+import {
+  getTgccSupervisorClient,
+  isTgccSupervisorConnected,
+  buildTgccChildSessionKey,
+} from "./tgcc-supervisor/index.js";
 import {
   resolveDisplaySessionKey,
   resolveInternalSessionKey,
@@ -32,6 +38,7 @@ export type SpawnSubagentParams = {
   agentId?: string;
   model?: string;
   thinking?: string;
+  cwd?: string;
   runTimeoutSeconds?: number;
   thread?: boolean;
   mode?: SpawnSubagentMode;
@@ -79,6 +86,101 @@ export function splitModelRef(ref?: string) {
     return { provider, model };
   }
   return { provider: undefined, model: trimmed };
+}
+
+/**
+ * Attempt to route a subagent spawn through TGCC supervisor.
+ * Returns null if TGCC routing is not applicable (fallback to normal spawn).
+ */
+async function trySpawnViaTgcc(
+  params: SpawnSubagentParams,
+  ctx: SpawnSubagentContext,
+): Promise<SpawnSubagentResult | null> {
+  // Only route through TGCC when connected and a cwd (repo) is specified
+  if (!isTgccSupervisorConnected()) return null;
+  
+  // Mode must be "run" (or unspecified, which defaults to "run")
+  // Session mode needs thread binding which TGCC doesn't support
+  if (params.mode === "session" || params.thread === true) return null;
+
+  const tgccClient = getTgccSupervisorClient();
+  if (!tgccClient?.isConnected()) return null;
+
+  const task = params.task;
+  const label = params.label?.trim() || "";
+  const shortUuid = crypto.randomUUID().slice(0, 8);
+  const agentId = label ? `oc-${label.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 20)}-${shortUuid}` : `oc-spawn-${shortUuid}`;
+
+  // Resolve requester session key for tracking
+  const cfg = loadConfig();
+  const { mainKey, alias } = resolveMainSessionAlias(cfg);
+  const requesterInternalKey = ctx.agentSessionKey
+    ? resolveInternalSessionKey({ key: ctx.agentSessionKey, alias, mainKey })
+    : alias;
+  const requesterDisplayKey = resolveDisplaySessionKey({ key: requesterInternalKey, alias, mainKey });
+
+  // Resolve repo from cwd or config
+  const repo = params.cwd?.trim() || undefined;
+  if (!repo) {
+    // No repo specified — fall back to normal spawn
+    // TGCC requires a repo for ephemeral agents
+    return null;
+  }
+
+  try {
+    // Create ephemeral agent
+    const createResult = await tgccClient.createAgent({
+      agentId,
+      repo,
+      model: params.model,
+      permissionMode: "bypassPermissions",
+      timeoutMs: params.runTimeoutSeconds ? params.runTimeoutSeconds * 1000 : undefined,
+    });
+
+    // Send the task message to the agent
+    await tgccClient.sendMessage(createResult.agentId, task, { subscribe: true });
+
+    // Register subagent run
+    const childKey = buildTgccChildSessionKey(createResult.agentId);
+    const runId = crypto.randomUUID();
+    registerSubagentRun({
+      runId,
+      childSessionKey: childKey,
+      requesterSessionKey: requesterInternalKey,
+      requesterDisplayKey,
+      task: task.slice(0, 200),
+      cleanup: params.cleanup ?? "keep",
+      label: label || createResult.agentId,
+      model: params.model,
+      spawnMode: "run",
+      runTimeoutSeconds: params.runTimeoutSeconds,
+      expectsCompletionMessage: params.expectsCompletionMessage,
+    });
+
+    // Patch the run with TGCC transport info
+    const runs = listSubagentRunsForRequester(requesterInternalKey);
+    const tgccRun = runs.find((r) => r.runId === runId);
+    if (tgccRun) {
+      tgccRun.transport = "tgcc-supervisor";
+      tgccRun.tgccAgentId = createResult.agentId;
+    }
+
+    return {
+      status: "accepted",
+      childSessionKey: childKey,
+      runId,
+      mode: "run",
+      note: "Spawned via TGCC supervisor. Results auto-announce on completion.",
+      modelApplied: !!params.model,
+    };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // If TGCC spawn fails, fall back to normal spawn
+    // (don't error out completely, just let the normal path handle it)
+    const tgccLog = createSubsystemLogger("tgcc-supervisor");
+    tgccLog.warn(`TGCC ephemeral spawn failed, falling back to normal: ${errMsg}`);
+    return null;
+  }
 }
 
 function resolveSpawnMode(params: {
@@ -167,6 +269,13 @@ export async function spawnSubagentDirect(
   params: SpawnSubagentParams,
   ctx: SpawnSubagentContext,
 ): Promise<SpawnSubagentResult> {
+  // ── TGCC ephemeral agent routing ─────────────────────────────────
+  // When TGCC supervisor is connected and the spawn has a cwd (repo),
+  // route through TGCC to create an ephemeral agent instead of spawning
+  // an OpenClaw-managed subagent session.
+  const tgccResult = await trySpawnViaTgcc(params, ctx);
+  if (tgccResult) return tgccResult;
+
   const task = params.task;
   const label = params.label?.trim() || "";
   const requestedAgentId = params.agentId;

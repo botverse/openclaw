@@ -6,6 +6,7 @@
 
 import { execSync } from "node:child_process";
 import { loadConfig } from "../../config/config.js";
+import { callGateway } from "../../gateway/call.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
   findSubagentRunByChildSessionKey,
@@ -259,6 +260,27 @@ function attachEventHandlers(c: TgccSupervisorClient): void {
   c.on("tgcc:process_exit", handleProcessExit);
   c.on("tgcc:session_takeover", handleSessionTakeover);
   c.on("tgcc:api_error", handleApiError);
+
+  // Phase 2: lifecycle events
+  c.on("tgcc:bridge_started", () => void refreshAgentCache());
+  c.on("tgcc:cc_spawned", handleCcSpawned);
+  c.on("tgcc:agent_created", handleAgentCreated);
+  c.on("tgcc:agent_destroyed", handleAgentDestroyed);
+  c.on("tgcc:state_changed", handleStateChanged);
+
+  // Phase 2: high-signal observability events → inject into requester session
+  c.on("tgcc:build_result", handleObservabilityEvent);
+  c.on("tgcc:git_commit", handleObservabilityEvent);
+  c.on("tgcc:context_pressure", handleObservabilityEvent);
+  c.on("tgcc:failure_loop", handleObservabilityEvent);
+  c.on("tgcc:stuck", handleObservabilityEvent);
+  c.on("tgcc:task_milestone", handleObservabilityEvent);
+  c.on("tgcc:cc_message", handleObservabilityEvent);
+  c.on("tgcc:subagent_spawn", handleObservabilityEvent);
+  c.on("tgcc:budget_alert", handleObservabilityEvent);
+
+  // Phase 3: reverse notify
+  c.on("tgcc:reverse_notify", handleReverseNotify);
 }
 
 /** Find the active subagent run for a TGCC agent. Keyed by agentId only. */
@@ -335,5 +357,196 @@ function handleSessionTakeover(event: TgccSessionTakeoverEvent): void {
 
 function handleApiError(event: TgccApiErrorEvent): void {
   log.warn(`api_error from ${event.agentId}:${event.sessionId}: ${event.message}`);
-  // Phase 1: just log. Could inject as system message into requester session later.
+  // Inject as observability notification
+  const run = findTgccRun(event.agentId);
+  if (run) {
+    void injectObservabilityMessage(
+      run,
+      `[subagent:${event.agentId}] ❌ API error: ${event.message}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Lifecycle event handlers
+// ---------------------------------------------------------------------------
+
+function handleCcSpawned(event: Record<string, unknown>): void {
+  const agentId = String(event.agentId ?? "");
+  const source = String(event.source ?? "unknown");
+  log.info(`cc_spawned: ${agentId} (source=${source})`);
+  // Update cache state
+  if (agentId && agentCache[agentId]) {
+    agentCache[agentId].state = "active";
+  }
+}
+
+function handleAgentCreated(event: Record<string, unknown>): void {
+  const agentId = String(event.agentId ?? "");
+  const repo = String(event.repo ?? "");
+  const agentType = String(event.type ?? "ephemeral") as "persistent" | "ephemeral";
+  log.info(`agent_created: ${agentId} (type=${agentType}, repo=${repo})`);
+  if (agentId) {
+    agentCache[agentId] = { repo, type: agentType, state: "idle" };
+    agentCacheUpdatedAt = Date.now();
+  }
+}
+
+function handleAgentDestroyed(event: Record<string, unknown>): void {
+  const agentId = String(event.agentId ?? "");
+  log.info(`agent_destroyed: ${agentId}`);
+  if (agentId) {
+    delete agentCache[agentId];
+    agentCacheUpdatedAt = Date.now();
+  }
+  // Clean up subagent run if exists
+  const run = findTgccRun(agentId);
+  if (run && !run.endedAt) {
+    markExternalSubagentRunComplete({
+      runId: run.runId,
+      outcome: { status: "error", error: "agent destroyed" },
+      endedAt: Date.now(),
+    });
+  }
+}
+
+function handleStateChanged(event: Record<string, unknown>): void {
+  const agentId = String(event.agentId ?? "");
+  const field = String(event.field ?? "");
+  const newValue = event.newValue;
+  log.info(`state_changed: ${agentId}.${field} = ${String(newValue)}`);
+  if (agentId && agentCache[agentId]) {
+    if (field === "state" && (newValue === "idle" || newValue === "active")) {
+      agentCache[agentId].state = newValue;
+    } else if (field === "repo" && typeof newValue === "string") {
+      agentCache[agentId].repo = newValue;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Observability event handler — inject system messages
+// ---------------------------------------------------------------------------
+
+function formatObservabilityMessage(event: Record<string, unknown>): string | null {
+  const agentId = String(event.agentId ?? "unknown");
+  const prefix = `[subagent:${agentId}]`;
+  const eventName = String(event.event ?? "");
+
+  switch (eventName) {
+    case "build_result": {
+      const passed = event.passed === true;
+      if (passed) return `${prefix} 🔨 Build passed ✅`;
+      const errors = typeof event.errors === "number" ? event.errors : "?";
+      const summary = typeof event.summary === "string" ? `: ${event.summary}` : "";
+      return `${prefix} 🔨 Build failed: ${errors} errors${summary}`;
+    }
+    case "git_commit": {
+      const msg = typeof event.message === "string" ? event.message : "?";
+      return `${prefix} 📝 Committed: "${msg}"`;
+    }
+    case "context_pressure": {
+      const pct = typeof event.percent === "number" ? event.percent : "?";
+      return `${prefix} 🧠 Context at ${pct}%`;
+    }
+    case "failure_loop": {
+      const n = typeof event.consecutiveFailures === "number" ? event.consecutiveFailures : "?";
+      return `${prefix} 🔁 ${n} consecutive failures`;
+    }
+    case "stuck": {
+      const mins = typeof event.silentMs === "number" ? Math.round(event.silentMs / 60_000) : "?";
+      return `${prefix} ⚠️ No progress for ${mins}m`;
+    }
+    case "task_milestone": {
+      const task = typeof event.task === "string" ? event.task : "?";
+      const progress = typeof event.progress === "string" ? `[${event.progress}] ` : "";
+      return `${prefix} 📋 ${progress}${task} ✅`;
+    }
+    case "cc_message": {
+      const text = typeof event.text === "string" ? event.text : "?";
+      return `${prefix} 💬 "${text}"`;
+    }
+    case "subagent_spawn": {
+      const count = typeof event.count === "number" ? event.count : "?";
+      return `${prefix} 🔄 Spawned ${count} sub-agents`;
+    }
+    case "budget_alert": {
+      const cost = typeof event.costUsd === "number" ? `$${event.costUsd.toFixed(2)}` : "$?";
+      const budget = typeof event.budgetUsd === "number" ? `$${event.budgetUsd.toFixed(2)}` : "$?";
+      return `${prefix} 💰 ${cost} spent (budget: ${budget})`;
+    }
+    default:
+      return null;
+  }
+}
+
+function handleObservabilityEvent(event: Record<string, unknown>): void {
+  const agentId = String(event.agentId ?? "");
+  const message = formatObservabilityMessage(event);
+  if (!message) return;
+
+  log.info(`observability: ${message}`);
+
+  const run = findTgccRun(agentId);
+  if (!run) {
+    log.info(`no subagent run for tgcc:${agentId}, skipping injection`);
+    return;
+  }
+
+  void injectObservabilityMessage(run, message);
+}
+
+/**
+ * Inject a system-level message into the requester's session context.
+ * Uses callGateway to send a user-role message that the agent will process.
+ */
+async function injectObservabilityMessage(
+  run: SubagentRunRecord,
+  message: string,
+): Promise<void> {
+  try {
+    await callGateway({
+      method: "agent",
+      params: {
+        sessionKey: run.requesterSessionKey,
+        message: `[System Event] ${message}`,
+        deliver: false,
+        channel: "internal",
+      },
+      timeoutMs: 10_000,
+    });
+  } catch (err) {
+    log.warn(
+      `failed to inject observability message: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Reverse notify handler
+// ---------------------------------------------------------------------------
+
+function handleReverseNotify(event: { target: string; message: string }): void {
+  const { target, message } = event;
+  log.info(`reverse notify to ${target}: ${message.slice(0, 200)}`);
+
+  if (!target || !message) return;
+
+  // Resolve target to a session key — "main" maps to the main agent session
+  const cfg = loadConfig();
+  const mainKey = cfg.session?.mainKey ?? "agent:main:main";
+  const sessionKey = target === "main" ? mainKey : `agent:${target}:main`;
+
+  void callGateway({
+    method: "agent",
+    params: {
+      sessionKey,
+      message: `[TGCC Notification] ${message}`,
+      deliver: false,
+      channel: "internal",
+    },
+    timeoutMs: 10_000,
+  }).catch((err: unknown) => {
+    log.warn(`reverse notify failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 }

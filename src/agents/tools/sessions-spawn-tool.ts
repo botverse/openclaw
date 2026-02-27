@@ -94,6 +94,7 @@ export function createSessionsSpawnTool(opts?: {
                 agentId: requestedAgentId,
                 model: modelOverride,
                 thinking: thinkingOverrideRaw,
+                cwd,
                 runTimeoutSeconds,
                 thread,
                 mode,

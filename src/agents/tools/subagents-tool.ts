@@ -46,7 +46,7 @@ import {
 
 } from "../tgcc-supervisor/index.js";
 
-const SUBAGENT_ACTIONS = ["list", "kill", "steer"] as const;
+const SUBAGENT_ACTIONS = ["list", "kill", "steer", "log"] as const;
 type SubagentAction = (typeof SUBAGENT_ACTIONS)[number];
 
 const DEFAULT_RECENT_MINUTES = 30;
@@ -62,6 +62,11 @@ const SubagentsToolSchema = Type.Object({
   target: Type.Optional(Type.String()),
   message: Type.Optional(Type.String()),
   recentMinutes: Type.Optional(Type.Number({ minimum: 1 })),
+  offset: Type.Optional(Type.Number({ minimum: 0 })),
+  limit: Type.Optional(Type.Number({ minimum: 1 })),
+  grep: Type.Optional(Type.String()),
+  since: Type.Optional(Type.Number()),
+  type: Type.Optional(Type.String()),
 });
 
 type SessionEntryResolution = {
@@ -349,7 +354,7 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
     label: "Subagents",
     name: "subagents",
     description:
-      "List, kill, or steer spawned sub-agents for this requester session. Use this for sub-agent orchestration.",
+      "List, kill, steer, or view logs of spawned sub-agents for this requester session. Use this for sub-agent orchestration.",
     parameters: SubagentsToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
@@ -428,6 +433,31 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
           if (trackedTgccAgents.has(agentId)) {continue;}
           if (mapping.state !== "active") {continue;}
           tgccLines.push(`  [tgcc] ${agentId} (${mapping.type ?? "persistent"}, active)`);
+        }
+
+        // Enrich TGCC-backed active runs with live status (runtime, cost)
+        const tgccClient = getTgccSupervisorClient();
+        if (tgccClient?.isConnected()) {
+          for (const entry of active) {
+            const run = runs.find((r) => r.runId === entry.view.runId);
+            if (run?.transport === "tgcc-supervisor" && run.tgccAgentId) {
+              try {
+                const status = await tgccClient.getStatus(run.tgccAgentId);
+                const agent = status.agents?.[0];
+                if (agent) {
+                  (entry.view as Record<string, unknown>).tgccState = agent.state;
+                }
+                // Include session cost if available
+                const session = status.sessions?.[0];
+                if (session?.totalCostUsd != null) {
+                  (entry.view as Record<string, unknown>).costUsd = session.totalCostUsd;
+                  entry.line += ` ($${session.totalCostUsd.toFixed(4)})`;
+                }
+              } catch {
+                // Non-critical — don't fail the list
+              }
+            }
+          }
         }
 
         const text = buildListText({ active, recent, recentMinutes });
@@ -771,6 +801,78 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
           text: `steered ${resolveSubagentLabel(resolved.entry)}.`,
         });
       }
+      if (action === "log") {
+        const target = readStringParam(params, "target", { required: true });
+        const resolved = resolveSubagentTarget(runs, target, { recentMinutes });
+        if (!resolved.entry) {
+          return jsonResult({
+            status: "error",
+            action: "log",
+            target,
+            error: resolved.error ?? "Unknown subagent target.",
+          });
+        }
+
+        // Only TGCC-backed runs support log retrieval
+        if (resolved.entry.transport !== "tgcc-supervisor" || !resolved.entry.tgccAgentId) {
+          return jsonResult({
+            status: "error",
+            action: "log",
+            target,
+            error: "Log retrieval is only available for TGCC-backed subagents.",
+          });
+        }
+
+        const tgccClient = getTgccSupervisorClient();
+        if (!tgccClient?.isConnected()) {
+          return jsonResult({
+            status: "error",
+            action: "log",
+            target,
+            error: "TGCC supervisor not connected.",
+          });
+        }
+
+        try {
+          const logOpts: { offset?: number; limit?: number; grep?: string; since?: number; type?: string } = {};
+          const offsetParam = readNumberParam(params, "offset");
+          if (offsetParam != null) logOpts.offset = offsetParam;
+          const limitParam = readNumberParam(params, "limit");
+          if (limitParam != null) logOpts.limit = limitParam;
+          const grepParam = readStringParam(params, "grep");
+          if (grepParam) logOpts.grep = grepParam;
+          const sinceParam = readNumberParam(params, "since");
+          if (sinceParam != null) logOpts.since = sinceParam;
+          const typeParam = readStringParam(params, "type");
+          if (typeParam) logOpts.type = typeParam;
+
+          const logResult = await tgccClient.getLog(resolved.entry.tgccAgentId, logOpts);
+          const lines = logResult.lines.map((line) => {
+            const ts = new Date(line.ts).toISOString().slice(11, 19);
+            return `[${ts}] [${line.type}] ${line.text}`;
+          });
+
+          return jsonResult({
+            status: "ok",
+            action: "log",
+            target,
+            label: resolveSubagentLabel(resolved.entry),
+            totalLines: logResult.totalLines,
+            returnedLines: logResult.returnedLines,
+            offset: logResult.offset,
+            text: lines.length > 0 ? lines.join("\n") : "(no log lines)",
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return jsonResult({
+            status: "error",
+            action: "log",
+            target,
+            error: `TGCC get_log failed: ${errMsg}`,
+          });
+        }
+      }
+
       return jsonResult({
         status: "error",
         error: "Unsupported action.",

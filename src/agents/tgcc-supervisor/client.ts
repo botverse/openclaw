@@ -8,6 +8,7 @@
  */
 
 import crypto from "node:crypto";
+import { exec as cpExec } from "node:child_process";
 import net from "node:net";
 import { EventEmitter } from "node:events";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
@@ -225,6 +226,57 @@ export class TgccSupervisorClient extends EventEmitter {
     return this.sendCommand("unsubscribe", { agentId });
   }
 
+  // ── Phase 2: Ephemeral agent management ──────────────────────────────
+
+  /** Create an ephemeral agent for a one-off CC task. No Telegram bot. */
+  async createAgent(params: {
+    agentId?: string;
+    repo: string;
+    model?: string;
+    permissionMode?: string;
+    timeoutMs?: number;
+  }): Promise<{ agentId: string; state: string }> {
+    const result = await this.sendCommand("create_agent", {
+      agentId: params.agentId,
+      repo: params.repo,
+      model: params.model,
+      permissionMode: params.permissionMode,
+      timeoutMs: params.timeoutMs,
+    });
+    return result as { agentId: string; state: string };
+  }
+
+  /** Destroy an ephemeral agent (kills CC process if running, cleans up). */
+  async destroyAgent(agentId: string): Promise<{ destroyed: boolean }> {
+    const result = await this.sendCommand("destroy_agent", { agentId });
+    return result as { destroyed: boolean };
+  }
+
+  /** Query the event log for an agent's CC process (ring buffer). */
+  async getLog(
+    agentId: string,
+    opts?: { offset?: number; limit?: number; grep?: string; since?: number; type?: string },
+  ): Promise<{
+    totalLines: number;
+    returnedLines: number;
+    offset: number;
+    lines: Array<{ ts: number; type: string; text: string }>;
+  }> {
+    const params: Record<string, unknown> = { agentId };
+    if (opts?.offset != null) params.offset = opts.offset;
+    if (opts?.limit != null) params.limit = opts.limit;
+    if (opts?.grep) params.grep = opts.grep;
+    if (opts?.since != null) params.since = opts.since;
+    if (opts?.type) params.type = opts.type;
+    const result = await this.sendCommand("get_log", params);
+    return result as {
+      totalLines: number;
+      returnedLines: number;
+      offset: number;
+      lines: Array<{ ts: number; type: string; text: string }>;
+    };
+  }
+
   // ── Connection management ────────────────────────────────────────────
 
   private connect(): void {
@@ -377,8 +429,7 @@ export class TgccSupervisorClient extends EventEmitter {
     } else if (msg.type === "event") {
       this.handleEvent(msg);
     } else if (msg.type === "command") {
-      // Phase 3: reverse commands from TGCC → OpenClaw
-      log.info(`received reverse command: ${msg.action} (not yet implemented)`);
+      void this.handleReverseCommand(msg);
     }
   }
 
@@ -443,6 +494,36 @@ export class TgccSupervisorClient extends EventEmitter {
         void this.syncStateAfterConnect();
         break;
 
+      // Phase 2: lifecycle events
+      case "bridge_started":
+        this.emit("tgcc:bridge_started", msg);
+        break;
+      case "cc_spawned":
+        this.emit("tgcc:cc_spawned", msg);
+        break;
+      case "agent_created":
+        this.emit("tgcc:agent_created", msg);
+        break;
+      case "agent_destroyed":
+        this.emit("tgcc:agent_destroyed", msg);
+        break;
+      case "state_changed":
+        this.emit("tgcc:state_changed", msg);
+        break;
+
+      // Phase 2: high-signal observability events
+      case "build_result":
+      case "git_commit":
+      case "context_pressure":
+      case "failure_loop":
+      case "stuck":
+      case "task_milestone":
+      case "cc_message":
+      case "subagent_spawn":
+      case "budget_alert":
+        this.emit(`tgcc:${eventName}`, msg);
+        break;
+
       default:
         this.emit(`tgcc:${eventName}`, msg);
         break;
@@ -456,6 +537,132 @@ export class TgccSupervisorClient extends EventEmitter {
     } catch (err) {
       log.warn(`failed to sync state after connect: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  // ── Reverse command handling (TGCC → OpenClaw) ───────────────────────
+
+  private static readonly EXEC_DENY_PATTERNS = [
+    /rm\s+(-[a-z]*f[a-z]*\s+)?\//i,
+    /\bsudo\b/,
+    /\bmkfs\b/,
+    /\bdd\b.*\bof=\//,
+    /:\(\)\{/,
+    /\bchmod\s+777\s+\//,
+    /\bchown\b.*\//,
+    /\|\s*sh\b/,
+    /\$\(/,
+    /`[^`]*`/,
+  ];
+
+  private async handleReverseCommand(msg: SupervisorCommand): Promise<void> {
+    const { requestId, action, params } = msg;
+    log.info(`reverse command: ${action} (requestId=${requestId})`);
+
+    try {
+      switch (action) {
+        case "exec":
+          await this.handleExecCommand(requestId, params ?? {});
+          break;
+        case "restart_service":
+          await this.handleRestartServiceCommand(requestId, params ?? {});
+          break;
+        case "notify":
+          await this.handleNotifyCommand(requestId, params ?? {});
+          break;
+        default:
+          this.sendResponse(requestId, undefined, `Unknown reverse command: ${action}`);
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.warn(`reverse command ${action} failed: ${errMsg}`);
+      this.sendResponse(requestId, undefined, errMsg);
+    }
+  }
+
+  private async handleExecCommand(requestId: string, params: Record<string, unknown>): Promise<void> {
+    const command = typeof params.command === "string" ? params.command : "";
+    const agentId = typeof params.agentId === "string" ? params.agentId : "unknown";
+    const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 60_000;
+
+    if (!command.trim()) {
+      this.sendResponse(requestId, undefined, "Empty command");
+      return;
+    }
+
+    // Safety check
+    for (const pattern of TgccSupervisorClient.EXEC_DENY_PATTERNS) {
+      if (pattern.test(command)) {
+        log.warn(`reverse exec DENIED (agent=${agentId}): ${command}`);
+        this.sendResponse(requestId, undefined, `Command denied by safety gate: ${command.slice(0, 100)}`);
+        return;
+      }
+    }
+
+    log.info(`reverse exec (agent=${agentId}): ${command.slice(0, 200)}`);
+
+    return new Promise<void>((resolve) => {
+      cpExec(command, {
+        timeout: timeoutMs,
+        maxBuffer: 1024 * 1024,
+        cwd: typeof params.cwd === "string" ? params.cwd : undefined,
+      }, (err, stdout, stderr) => {
+        const exitCode = err && "code" in err ? (err as { code?: number }).code ?? 1 : err ? 1 : 0;
+        this.sendResponse(requestId, {
+          exitCode,
+          stdout: stdout.slice(0, 50_000),
+          stderr: stderr.slice(0, 50_000),
+        });
+        resolve();
+      });
+    });
+  }
+
+  private async handleRestartServiceCommand(requestId: string, params: Record<string, unknown>): Promise<void> {
+    const service = typeof params.service === "string" ? params.service : "";
+    const agentId = typeof params.agentId === "string" ? params.agentId : "unknown";
+
+    log.info(`reverse restart_service (agent=${agentId}, service=${service})`);
+
+    if (service === "tgcc") {
+      return new Promise<void>((resolve) => {
+        cpExec(
+          `tmux send-keys -t tgcc C-c '' Enter; sleep 1; tmux send-keys -t tgcc 'cd ~/Botverse/tgcc && node dist/cli.js run' Enter`,
+          { timeout: 15_000 },
+          (err) => {
+            if (err) {
+              this.sendResponse(requestId, undefined, `Failed to restart tgcc: ${err.message}`);
+            } else {
+              this.sendResponse(requestId, { restarted: true, service });
+            }
+            resolve();
+          },
+        );
+      });
+    }
+
+    this.sendResponse(requestId, undefined, `Unknown service: ${service}`);
+  }
+
+  private handleNotifyCommand(requestId: string, params: Record<string, unknown>): void {
+    const message = typeof params.message === "string" ? params.message : "";
+    const target = typeof params.target === "string" ? params.target : "";
+
+    if (!message.trim()) {
+      this.sendResponse(requestId, undefined, "Empty notification message");
+      return;
+    }
+
+    // Emit as event so index.ts can inject it via callGateway
+    this.emit("tgcc:reverse_notify", { target, message });
+    this.sendResponse(requestId, { notified: true });
+  }
+
+  private sendResponse(requestId: string, result?: unknown, error?: string): void {
+    this.sendRaw({
+      type: "response",
+      requestId,
+      ...(error ? { error } : { result }),
+    });
   }
 
   // ── Command sending ──────────────────────────────────────────────────
