@@ -1,17 +1,19 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { withEnvAsync } from "../test-utils/env.js";
-import { resolveImplicitProviders } from "./models-config.providers.js";
+import { createProviderAuthResolver } from "./models-config.providers.secrets.js";
 
 describe("Qianfan provider", () => {
-  it("should include qianfan when QIANFAN_API_KEY is configured", async () => {
-    const agentDir = mkdtempSync(join(tmpdir(), "openclaw-test-"));
-    await withEnvAsync({ QIANFAN_API_KEY: "test-key" }, async () => {
-      const providers = await resolveImplicitProviders({ agentDir });
-      expect(providers?.qianfan).toBeDefined();
-      expect(providers?.qianfan?.apiKey).toBe("QIANFAN_API_KEY");
+  it("resolves QIANFAN_API_KEY markers through provider auth lookup", () => {
+    const resolveAuth = createProviderAuthResolver(
+      {
+        QIANFAN_API_KEY: "test-key", // pragma: allowlist secret
+      } as NodeJS.ProcessEnv,
+      { version: 1, profiles: {} },
+    );
+
+    expect(resolveAuth("qianfan")).toMatchObject({
+      apiKey: "QIANFAN_API_KEY",
+      mode: "api_key",
+      source: "env",
     });
   });
 });

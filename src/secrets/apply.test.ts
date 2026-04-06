@@ -2,8 +2,15 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  buildTalkTestProviderConfig,
+  TALK_TEST_PROVIDER_API_KEY_PATH,
+  TALK_TEST_PROVIDER_API_KEY_PATH_SEGMENTS,
+  TALK_TEST_PROVIDER_ID,
+} from "../test-utils/talk-test-provider.js";
 import { runSecretsApply } from "./apply.js";
 import type { SecretsApplyPlan } from "./plan.js";
+import { clearSecretsRuntimeSnapshot } from "./runtime.js";
 
 const OPENAI_API_KEY_ENV_REF = {
   source: "env",
@@ -72,7 +79,7 @@ async function createApplyFixture(): Promise<ApplyFixture> {
     env: {
       OPENCLAW_STATE_DIR: paths.stateDir,
       OPENCLAW_CONFIG_PATH: paths.configPath,
-      OPENAI_API_KEY: "sk-live-env",
+      OPENAI_API_KEY: "sk-live-env", // pragma: allowlist secret
     },
   };
 }
@@ -91,19 +98,19 @@ async function seedDefaultApplyFixture(fixture: ApplyFixture): Promise<void> {
       "openai:default": {
         type: "api_key",
         provider: "openai",
-        key: "sk-openai-plaintext",
+        key: "sk-openai-plaintext", // pragma: allowlist secret
       },
     },
   });
   await writeJsonFile(fixture.authJsonPath, {
     openai: {
       type: "api_key",
-      key: "sk-openai-plaintext",
+      key: "sk-openai-plaintext", // pragma: allowlist secret
     },
   });
   await fs.writeFile(
     fixture.envPath,
-    "OPENAI_API_KEY=sk-openai-plaintext\nUNRELATED=value\n",
+    "OPENAI_API_KEY=sk-openai-plaintext\nUNRELATED=value\n", // pragma: allowlist secret
     "utf8",
   );
 }
@@ -149,6 +156,18 @@ function createOpenAiProviderTarget(params?: {
   };
 }
 
+function createOpenAiProviderHeaderTarget(params?: {
+  path?: string;
+  pathSegments?: string[];
+}): SecretsApplyPlan["targets"][number] {
+  return {
+    type: "models.providers.headers",
+    path: params?.path ?? "models.providers.openai.headers.x-api-key",
+    ...(params?.pathSegments ? { pathSegments: params.pathSegments } : {}),
+    ref: OPENAI_API_KEY_ENV_REF,
+  };
+}
+
 function createOneWayScrubOptions(): NonNullable<SecretsApplyPlan["options"]> {
   return {
     scrubEnv: true,
@@ -161,11 +180,13 @@ describe("secrets apply", () => {
   let fixture: ApplyFixture;
 
   beforeEach(async () => {
+    clearSecretsRuntimeSnapshot();
     fixture = await createApplyFixture();
     await seedDefaultApplyFixture(fixture);
   });
 
   afterEach(async () => {
+    clearSecretsRuntimeSnapshot();
     await fs.rm(fixture.rootDir, { recursive: true, force: true });
   });
 
@@ -178,6 +199,8 @@ describe("secrets apply", () => {
     const dryRun = await runSecretsApply({ plan, env: fixture.env, write: false });
     expect(dryRun.mode).toBe("dry-run");
     expect(dryRun.changed).toBe(true);
+    expect(dryRun.skippedExecRefs).toBe(0);
+    expect(dryRun.checks.resolvabilityComplete).toBe(true);
 
     const applied = await runSecretsApply({ plan, env: fixture.env, write: true });
     expect(applied.mode).toBe("write");
@@ -203,6 +226,120 @@ describe("secrets apply", () => {
     const nextEnv = await fs.readFile(fixture.envPath, "utf8");
     expect(nextEnv).not.toContain("sk-openai-plaintext");
     expect(nextEnv).toContain("UNRELATED=value");
+  });
+
+  it("skips exec SecretRef checks during dry-run unless explicitly allowed", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const execLogPath = path.join(fixture.rootDir, "exec-calls.log");
+    const execScriptPath = path.join(fixture.rootDir, "resolver.sh");
+    await fs.writeFile(
+      execScriptPath,
+      [
+        "#!/bin/sh",
+        `printf 'x\\n' >> ${JSON.stringify(execLogPath)}`,
+        "cat >/dev/null",
+        'printf \'{"protocolVersion":1,"values":{"providers/openai/apiKey":"sk-openai-exec"}}\'', // pragma: allowlist secret
+      ].join("\n"),
+      { encoding: "utf8", mode: 0o700 },
+    );
+
+    await writeJsonFile(fixture.configPath, {
+      secrets: {
+        providers: {
+          execmain: {
+            source: "exec",
+            command: execScriptPath,
+            jsonOnly: true,
+            timeoutMs: 20_000,
+            noOutputTimeoutMs: 10_000,
+          },
+        },
+      },
+      models: {
+        providers: {
+          openai: createOpenAiProviderConfig(),
+        },
+      },
+    });
+
+    const plan = createPlan({
+      targets: [
+        {
+          type: "models.providers.apiKey",
+          path: "models.providers.openai.apiKey",
+          providerId: "openai",
+          ref: { source: "exec", provider: "execmain", id: "providers/openai/apiKey" },
+        },
+      ],
+      options: {
+        scrubEnv: false,
+        scrubAuthProfilesForProviderTargets: false,
+        scrubLegacyAuthJson: false,
+      },
+    });
+
+    const dryRunSkipped = await runSecretsApply({ plan, env: fixture.env, write: false });
+    expect(dryRunSkipped.mode).toBe("dry-run");
+    expect(dryRunSkipped.skippedExecRefs).toBe(1);
+    expect(dryRunSkipped.checks.resolvabilityComplete).toBe(false);
+    await expect(fs.stat(execLogPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const dryRunAllowed = await runSecretsApply({
+      plan,
+      env: fixture.env,
+      write: false,
+      allowExec: true,
+    });
+    expect(dryRunAllowed.mode).toBe("dry-run");
+    expect(dryRunAllowed.skippedExecRefs).toBe(0);
+    const callLog = await fs.readFile(execLogPath, "utf8");
+    expect(callLog.split("\n").filter((line) => line.trim().length > 0).length).toBeGreaterThan(0);
+  });
+
+  it("rejects write mode for exec plans unless allowExec is set", async () => {
+    const plan = createPlan({
+      targets: [
+        {
+          type: "models.providers.apiKey",
+          path: "models.providers.openai.apiKey",
+          providerId: "openai",
+          ref: { source: "exec", provider: "execmain", id: "providers/openai/apiKey" },
+        },
+      ],
+      options: {
+        scrubEnv: false,
+        scrubAuthProfilesForProviderTargets: false,
+        scrubLegacyAuthJson: false,
+      },
+    });
+
+    await expect(runSecretsApply({ plan, env: fixture.env, write: true })).rejects.toThrow(
+      "Plan contains exec SecretRefs/providers. Re-run with --allow-exec.",
+    );
+  });
+
+  it("rejects write mode for plans with exec provider upserts unless allowExec is set", async () => {
+    const plan = createPlan({
+      targets: [createOpenAiProviderTarget()],
+      providerUpserts: {
+        execmain: {
+          source: "exec",
+          command: "/bin/echo",
+          args: ["ok"],
+        },
+      },
+      options: {
+        scrubEnv: false,
+        scrubAuthProfilesForProviderTargets: false,
+        scrubLegacyAuthJson: false,
+      },
+    });
+
+    await expect(runSecretsApply({ plan, env: fixture.env, write: true })).rejects.toThrow(
+      "Plan contains exec SecretRefs/providers. Re-run with --allow-exec.",
+    );
   });
 
   it("applies auth-profiles sibling ref targets to the scoped agent store", async () => {
@@ -357,7 +494,7 @@ describe("secrets apply", () => {
         entries: {
           "qa-secret-test": {
             enabled: true,
-            apiKey: "sk-skill-plaintext",
+            apiKey: "sk-skill-plaintext", // pragma: allowlist secret
           },
         },
       },
@@ -388,19 +525,10 @@ describe("secrets apply", () => {
     expect(rawConfig).not.toContain("sk-skill-plaintext");
   });
 
-  it("applies non-legacy target types", async () => {
-    await fs.writeFile(
+  it("applies talk provider target types", async () => {
+    await writeJsonFile(
       fixture.configPath,
-      `${JSON.stringify(
-        {
-          talk: {
-            apiKey: "sk-talk-plaintext",
-          },
-        },
-        null,
-        2,
-      )}\n`,
-      "utf8",
+      buildTalkTestProviderConfig("sk-talk-plaintext"), // pragma: allowlist secret
     );
 
     const plan: SecretsApplyPlan = {
@@ -410,9 +538,9 @@ describe("secrets apply", () => {
       generatedBy: "manual",
       targets: [
         {
-          type: "talk.apiKey",
-          path: "talk.apiKey",
-          pathSegments: ["talk", "apiKey"],
+          type: "talk.providers.*.apiKey",
+          path: TALK_TEST_PROVIDER_API_KEY_PATH,
+          pathSegments: [...TALK_TEST_PROVIDER_API_KEY_PATH_SEGMENTS],
           ref: { source: "env", provider: "default", id: "OPENAI_API_KEY" },
         },
       ],
@@ -427,13 +555,54 @@ describe("secrets apply", () => {
     expect(result.changed).toBe(true);
 
     const nextConfig = JSON.parse(await fs.readFile(fixture.configPath, "utf8")) as {
-      talk?: { apiKey?: unknown };
+      talk?: { providers?: Record<string, { apiKey?: unknown }> };
     };
-    expect(nextConfig.talk?.apiKey).toEqual({
+    expect(nextConfig.talk?.providers?.[TALK_TEST_PROVIDER_ID]?.apiKey).toEqual({
       source: "env",
       provider: "default",
       id: "OPENAI_API_KEY",
     });
+  });
+
+  it("applies model provider header targets", async () => {
+    await writeJsonFile(fixture.configPath, {
+      models: {
+        providers: {
+          openai: {
+            ...createOpenAiProviderConfig(),
+            headers: {
+              "x-api-key": "sk-header-plaintext",
+            },
+          },
+        },
+      },
+    });
+
+    const plan = createPlan({
+      targets: [
+        createOpenAiProviderHeaderTarget({
+          pathSegments: ["models", "providers", "openai", "headers", "x-api-key"],
+        }),
+      ],
+      options: {
+        scrubEnv: false,
+        scrubAuthProfilesForProviderTargets: false,
+        scrubLegacyAuthJson: false,
+      },
+    });
+
+    const nextConfig = await applyPlanAndReadConfig<{
+      models?: {
+        providers?: {
+          openai?: {
+            headers?: Record<string, unknown>;
+          };
+        };
+      };
+    }>(fixture, plan);
+    expect(nextConfig.models?.providers?.openai?.headers?.["x-api-key"]).toEqual(
+      OPENAI_API_KEY_ENV_REF,
+    );
   });
 
   it("applies array-indexed targets for agent memory search", async () => {
@@ -447,7 +616,7 @@ describe("secrets apply", () => {
                 id: "main",
                 memorySearch: {
                   remote: {
-                    apiKey: "sk-memory-plaintext",
+                    apiKey: "sk-memory-plaintext", // pragma: allowlist secret
                   },
                 },
               },
@@ -480,7 +649,7 @@ describe("secrets apply", () => {
       },
     };
 
-    fixture.env.MEMORY_REMOTE_API_KEY = "sk-memory-live-env";
+    fixture.env.MEMORY_REMOTE_API_KEY = "sk-memory-live-env"; // pragma: allowlist secret
     const result = await runSecretsApply({ plan, env: fixture.env, write: true });
     expect(result.changed).toBe(true);
 

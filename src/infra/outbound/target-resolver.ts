@@ -10,8 +10,11 @@ import { buildDirectoryCacheKey, DirectoryCache } from "./directory-cache.js";
 import { ambiguousTargetError, unknownTargetError } from "./target-errors.js";
 import {
   buildTargetResolverSignature,
+  looksLikeTargetId,
+  maybeResolvePluginMessagingTarget,
   normalizeChannelTargetInput,
   normalizeTargetForProvider,
+  resolveNormalizedTargetInput,
 } from "./target-normalization.js";
 
 export type TargetResolveKind = ChannelDirectoryEntryKind | "channel";
@@ -29,6 +32,12 @@ export type ResolveMessagingTargetResult =
   | { ok: true; target: ResolvedMessagingTarget }
   | { ok: false; error: Error; candidates?: ChannelDirectoryEntry[] };
 
+function asResolvedMessagingTarget(
+  target: Awaited<ReturnType<typeof maybeResolvePluginMessagingTarget>>,
+): ResolvedMessagingTarget | undefined {
+  return target;
+}
+
 export async function resolveChannelTarget(params: {
   cfg: OpenClawConfig;
   channel: ChannelId;
@@ -38,6 +47,21 @@ export async function resolveChannelTarget(params: {
   runtime?: RuntimeEnv;
 }): Promise<ResolveMessagingTargetResult> {
   return resolveMessagingTarget(params);
+}
+
+export async function maybeResolveIdLikeTarget(params: {
+  cfg: OpenClawConfig;
+  channel: ChannelId;
+  input: string;
+  accountId?: string | null;
+  preferredKind?: TargetResolveKind;
+}): Promise<ResolvedMessagingTarget | undefined> {
+  return asResolvedMessagingTarget(
+    await maybeResolvePluginMessagingTarget({
+      ...params,
+      requireIdLike: true,
+    }),
+  );
 }
 
 const CACHE_TTL_MS = 30 * 60 * 1000;
@@ -119,31 +143,13 @@ export function formatTargetDisplay(params: {
     ? trimmedTarget.slice(channelPrefix.length)
     : trimmedTarget;
 
-  const withoutPrefix = withoutProvider.replace(/^telegram:/i, "");
-  if (/^channel:/i.test(withoutPrefix)) {
-    return `#${withoutPrefix.replace(/^channel:/i, "")}`;
+  if (/^channel:/i.test(withoutProvider)) {
+    return `#${withoutProvider.replace(/^channel:/i, "")}`;
   }
-  if (/^user:/i.test(withoutPrefix)) {
-    return `@${withoutPrefix.replace(/^user:/i, "")}`;
+  if (/^user:/i.test(withoutProvider)) {
+    return `@${withoutProvider.replace(/^user:/i, "")}`;
   }
-  return withoutPrefix;
-}
-
-function preserveTargetCase(channel: ChannelId, raw: string, normalized: string): string {
-  if (channel !== "slack") {
-    return normalized;
-  }
-  const trimmed = raw.trim();
-  if (/^channel:/i.test(trimmed) || /^user:/i.test(trimmed)) {
-    return trimmed;
-  }
-  if (trimmed.startsWith("#")) {
-    return `channel:${trimmed.slice(1).trim()}`;
-  }
-  if (trimmed.startsWith("@")) {
-    return `user:${trimmed.slice(1).trim()}`;
-  }
-  return trimmed;
+  return withoutProvider;
 }
 
 function detectTargetKind(
@@ -158,17 +164,22 @@ function detectTargetKind(
   if (!trimmed) {
     return "group";
   }
+  const inferredChatType = getChannelPlugin(channel)?.messaging?.inferTargetChatType?.({ to: raw });
+  if (inferredChatType === "direct") {
+    return "user";
+  }
+  if (inferredChatType === "channel") {
+    return "channel";
+  }
+  if (inferredChatType === "group") {
+    return "group";
+  }
 
   if (trimmed.startsWith("@") || /^<@!?/.test(trimmed) || /^user:/i.test(trimmed)) {
     return "user";
   }
   if (trimmed.startsWith("#") || /^channel:/i.test(trimmed)) {
     return "group";
-  }
-
-  // For some channels (e.g., BlueBubbles/iMessage), bare phone numbers are almost always DM targets.
-  if ((channel === "bluebubbles" || channel === "imessage") && /^\+?\d{6,}$/.test(trimmed)) {
-    return "user";
   }
 
   return "group";
@@ -302,18 +313,15 @@ async function getDirectoryEntries(params: {
 }
 
 function buildNormalizedResolveResult(params: {
-  channel: ChannelId;
-  raw: string;
   normalized: string;
   kind: TargetResolveKind;
 }): ResolveMessagingTargetResult {
-  const directTarget = preserveTargetCase(params.channel, params.raw, params.normalized);
   return {
     ok: true,
     target: {
-      to: directTarget,
+      to: params.normalized,
       kind: params.kind,
-      display: stripTargetPrefixes(params.raw),
+      display: stripTargetPrefixes(params.normalized),
       source: "normalized",
     },
   };
@@ -355,42 +363,30 @@ export async function resolveMessagingTarget(params: {
   const providerLabel = plugin?.meta?.label ?? params.channel;
   const hint = plugin?.messaging?.targetResolver?.hint;
   const kind = detectTargetKind(params.channel, raw, params.preferredKind);
-  const normalized = normalizeTargetForProvider(params.channel, raw) ?? raw;
-  const looksLikeTargetId = (): boolean => {
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      return false;
-    }
-    const lookup = plugin?.messaging?.targetResolver?.looksLikeId;
-    if (lookup) {
-      return lookup(trimmed, normalized);
-    }
-    if (/^(channel|group|user):/i.test(trimmed)) {
-      return true;
-    }
-    if (/^[@#]/.test(trimmed)) {
-      return true;
-    }
-    if (/^\+?\d{6,}$/.test(trimmed)) {
-      // BlueBubbles/iMessage phone numbers should usually resolve via the directory to a DM chat,
-      // otherwise the provider may pick an existing group containing that handle.
-      if (params.channel === "bluebubbles" || params.channel === "imessage") {
-        return false;
-      }
-      return true;
-    }
-    if (trimmed.includes("@thread")) {
-      return true;
-    }
-    if (/^(conversation|user):/i.test(trimmed)) {
-      return true;
-    }
-    return false;
-  };
-  if (looksLikeTargetId()) {
-    return buildNormalizedResolveResult({
+  const normalizedInput = resolveNormalizedTargetInput(params.channel, raw);
+  const normalized = normalizedInput?.normalized ?? raw;
+  if (
+    normalizedInput &&
+    looksLikeTargetId({
       channel: params.channel,
-      raw,
+      raw: normalizedInput.raw,
+      normalized,
+    })
+  ) {
+    const resolvedIdLikeTarget = await maybeResolveIdLikeTarget({
+      cfg: params.cfg,
+      channel: params.channel,
+      input: raw,
+      accountId: params.accountId,
+      preferredKind: params.preferredKind,
+    });
+    if (resolvedIdLikeTarget) {
+      return {
+        ok: true,
+        target: resolvedIdLikeTarget,
+      };
+    }
+    return buildNormalizedResolveResult({
       normalized,
       kind,
     });
@@ -440,18 +436,20 @@ export async function resolveMessagingTarget(params: {
       candidates: match.entries,
     };
   }
-  // For iMessage-style channels, allow sending directly to the normalized handle
-  // even if the directory doesn't contain an entry yet.
-  if (
-    (params.channel === "bluebubbles" || params.channel === "imessage") &&
-    /^\+?\d{6,}$/.test(query)
-  ) {
-    return buildNormalizedResolveResult({
+  const resolvedFallbackTarget = asResolvedMessagingTarget(
+    await maybeResolvePluginMessagingTarget({
+      cfg: params.cfg,
       channel: params.channel,
-      raw,
-      normalized,
-      kind,
-    });
+      input: raw,
+      accountId: params.accountId,
+      preferredKind: params.preferredKind,
+    }),
+  );
+  if (resolvedFallbackTarget) {
+    return {
+      ok: true,
+      target: resolvedFallbackTarget,
+    };
   }
 
   return {

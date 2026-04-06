@@ -5,17 +5,19 @@ import type {
   PluginHookBeforeMessageWriteResult,
 } from "../plugins/types.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
+import { formatContextLimitTruncationNotice } from "./pi-embedded-runner/tool-result-context-guard.js";
 import {
-  HARD_MAX_TOOL_RESULT_CHARS,
+  DEFAULT_MAX_LIVE_TOOL_RESULT_CHARS,
   truncateToolResultMessage,
 } from "./pi-embedded-runner/tool-result-truncation.js";
 import { createPendingToolCallState } from "./session-tool-result-state.js";
 import { makeMissingToolResult, sanitizeToolCallInputs } from "./session-transcript-repair.js";
 import { extractToolCallsFromAssistant, extractToolResultId } from "./tool-call-id.js";
+const RAW_APPEND_MESSAGE = Symbol("openclaw.session.rawAppendMessage");
 
-const GUARD_TRUNCATION_SUFFIX =
-  "\n\n⚠️ [Content truncated during persistence — original exceeded size limit. " +
-  "Use offset/limit parameters or request specific sections for large content.]";
+type SessionManagerWithRawAppend = SessionManager & {
+  [RAW_APPEND_MESSAGE]?: SessionManager["appendMessage"];
+};
 
 /**
  * Truncate oversized text content blocks in a tool result message.
@@ -26,8 +28,8 @@ function capToolResultSize(msg: AgentMessage): AgentMessage {
   if ((msg as { role?: string }).role !== "toolResult") {
     return msg;
   }
-  return truncateToolResultMessage(msg, HARD_MAX_TOOL_RESULT_CHARS, {
-    suffix: GUARD_TRUNCATION_SUFFIX,
+  return truncateToolResultMessage(msg, DEFAULT_MAX_LIVE_TOOL_RESULT_CHARS, {
+    suffix: (truncatedChars) => formatContextLimitTruncationNotice(truncatedChars),
     minKeepChars: 2_000,
   });
 }
@@ -68,9 +70,21 @@ function normalizePersistedToolResultName(
   return toolResult;
 }
 
+/**
+ * Return the unguarded appendMessage implementation for a session manager.
+ */
+export function getRawSessionAppendMessage(
+  sessionManager: SessionManager,
+): SessionManager["appendMessage"] {
+  const rawAppend = (sessionManager as SessionManagerWithRawAppend)[RAW_APPEND_MESSAGE];
+  return rawAppend ?? sessionManager.appendMessage.bind(sessionManager);
+}
+
 export function installSessionToolResultGuard(
   sessionManager: SessionManager,
   opts?: {
+    /** Optional session key for transcript update broadcasts. */
+    sessionKey?: string;
     /**
      * Optional transform applied to any message before persistence.
      */
@@ -107,7 +121,8 @@ export function installSessionToolResultGuard(
   clearPendingToolResults: () => void;
   getPendingIds: () => string[];
 } {
-  const originalAppend = sessionManager.appendMessage.bind(sessionManager);
+  const originalAppend = getRawSessionAppendMessage(sessionManager);
+  (sessionManager as SessionManagerWithRawAppend)[RAW_APPEND_MESSAGE] = originalAppend;
   const pendingState = createPendingToolCallState();
   const persistMessage = (message: AgentMessage) => {
     const transformer = opts?.transformMessageForPersistence;
@@ -245,7 +260,12 @@ export function installSessionToolResultGuard(
       sessionManager as { getSessionFile?: () => string | null }
     ).getSessionFile?.();
     if (sessionFile) {
-      emitSessionTranscriptUpdate(sessionFile);
+      emitSessionTranscriptUpdate({
+        sessionFile,
+        sessionKey: opts?.sessionKey,
+        message: finalMessage,
+        messageId: typeof result === "string" ? result : undefined,
+      });
     }
 
     if (toolCalls.length > 0) {

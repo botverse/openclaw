@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { registerSubCliByName, registerSubCliCommands } from "./register.subclis.js";
 
 const { acpAction, registerAcpCli } = vi.hoisted(() => {
   const action = vi.fn();
@@ -18,10 +19,16 @@ const { nodesAction, registerNodesCli } = vi.hoisted(() => {
   return { nodesAction: action, registerNodesCli: register };
 });
 
+const { registerQaCli } = vi.hoisted(() => ({
+  registerQaCli: vi.fn((program: Command) => {
+    const qa = program.command("qa");
+    qa.command("run").action(() => undefined);
+  }),
+}));
+
 vi.mock("../acp-cli.js", () => ({ registerAcpCli }));
 vi.mock("../nodes-cli.js", () => ({ registerNodesCli }));
-
-const { registerSubCliByName, registerSubCliCommands } = await import("./register.subclis.js");
+vi.mock("../qa-cli.js", () => ({ registerQaCli }));
 
 describe("registerSubCliCommands", () => {
   const originalArgv = process.argv;
@@ -76,6 +83,7 @@ describe("registerSubCliCommands", () => {
     expect(names).toContain("acp");
     expect(names).toContain("gateway");
     expect(names).toContain("clawbot");
+    expect(names).toContain("qa");
     expect(registerAcpCli).not.toHaveBeenCalled();
   });
 

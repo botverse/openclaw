@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/nextcloud-talk";
-import type { RuntimeEnv } from "openclaw/plugin-sdk/nextcloud-talk";
+import { ssrfPolicyFromPrivateNetworkOptIn } from "openclaw/plugin-sdk/ssrf-runtime";
+import { fetchWithSsrFGuard, type RuntimeEnv } from "../runtime-api.js";
 import type { ResolvedNextcloudTalkAccount } from "./accounts.js";
 import { normalizeResolvedSecretInputString } from "./secret-input.js";
 
@@ -11,6 +11,12 @@ const roomCache = new Map<
   string,
   { kind?: "direct" | "group"; fetchedAt: number; error?: string }
 >();
+
+export const __testing = {
+  resetRoomCache() {
+    roomCache.clear();
+  },
+};
 
 function resolveRoomCacheKey(params: { accountId: string; roomToken: string }) {
   return `${params.accountId}:${params.roomToken}`;
@@ -106,6 +112,7 @@ export async function resolveNextcloudTalkRoomKind(params: {
         },
       },
       auditContext: "nextcloud-talk.room-info",
+      policy: ssrfPolicyFromPrivateNetworkOptIn(account.config),
     });
     try {
       if (!response.ok) {

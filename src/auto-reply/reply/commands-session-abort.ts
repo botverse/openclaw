@@ -18,6 +18,7 @@ import { rejectUnauthorizedCommand } from "./command-gates.js";
 import { persistAbortTargetEntry } from "./commands-session-store.js";
 import type { CommandHandler } from "./commands-types.js";
 import { clearSessionQueues } from "./queue.js";
+import { replyRunRegistry } from "./reply-run-registry.js";
 
 type AbortTarget = {
   entry?: SessionEntry;
@@ -34,16 +35,25 @@ function resolveAbortTarget(params: {
   const targetSessionKey = params.ctx.CommandTargetSessionKey?.trim() || params.sessionKey;
   const { entry, key } = resolveSessionEntryForKey(params.sessionStore, targetSessionKey);
   if (entry && key) {
-    return { entry, key, sessionId: entry.sessionId };
+    return {
+      entry,
+      key,
+      sessionId: replyRunRegistry.resolveSessionId(key) ?? entry.sessionId,
+    };
   }
   if (params.sessionEntry && params.sessionKey) {
     return {
       entry: params.sessionEntry,
       key: params.sessionKey,
-      sessionId: params.sessionEntry.sessionId,
+      sessionId:
+        replyRunRegistry.resolveSessionId(params.sessionKey) ?? params.sessionEntry.sessionId,
     };
   }
-  return { entry: undefined, key: targetSessionKey, sessionId: undefined };
+  return {
+    entry: undefined,
+    key: targetSessionKey,
+    sessionId: targetSessionKey ? replyRunRegistry.resolveSessionId(targetSessionKey) : undefined,
+  };
 }
 
 function resolveAbortCutoffForTarget(params: {
@@ -70,6 +80,9 @@ async function applyAbortTarget(params: {
   abortCutoff?: AbortCutoff;
 }) {
   const { abortTarget } = params;
+  if (abortTarget.key) {
+    replyRunRegistry.abort(abortTarget.key);
+  }
   if (abortTarget.sessionId) {
     abortEmbeddedPiRun(abortTarget.sessionId);
   }
@@ -84,6 +97,23 @@ async function applyAbortTarget(params: {
   if (!persisted && params.abortKey) {
     setAbortMemory(params.abortKey, true);
   }
+}
+
+function buildAbortTargetApplyParams(
+  params: Parameters<CommandHandler>[0],
+  abortTarget: AbortTarget,
+) {
+  return {
+    abortTarget,
+    sessionStore: params.sessionStore,
+    storePath: params.storePath,
+    abortKey: params.command.abortKey,
+    abortCutoff: resolveAbortCutoffForTarget({
+      ctx: params.ctx,
+      commandSessionKey: params.sessionKey,
+      targetSessionKey: abortTarget.key,
+    }),
+  };
 }
 
 export const handleStopCommand: CommandHandler = async (params, allowTextCommands) => {
@@ -109,17 +139,7 @@ export const handleStopCommand: CommandHandler = async (params, allowTextCommand
       `stop: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
     );
   }
-  await applyAbortTarget({
-    abortTarget,
-    sessionStore: params.sessionStore,
-    storePath: params.storePath,
-    abortKey: params.command.abortKey,
-    abortCutoff: resolveAbortCutoffForTarget({
-      ctx: params.ctx,
-      commandSessionKey: params.sessionKey,
-      targetSessionKey: abortTarget.key,
-    }),
-  });
+  await applyAbortTarget(buildAbortTargetApplyParams(params, abortTarget));
 
   // Trigger internal hook for stop command
   const hookEvent = createInternalHookEvent(
@@ -160,16 +180,6 @@ export const handleAbortTrigger: CommandHandler = async (params, allowTextComman
     sessionEntry: params.sessionEntry,
     sessionStore: params.sessionStore,
   });
-  await applyAbortTarget({
-    abortTarget,
-    sessionStore: params.sessionStore,
-    storePath: params.storePath,
-    abortKey: params.command.abortKey,
-    abortCutoff: resolveAbortCutoffForTarget({
-      ctx: params.ctx,
-      commandSessionKey: params.sessionKey,
-      targetSessionKey: abortTarget.key,
-    }),
-  });
+  await applyAbortTarget(buildAbortTargetApplyParams(params, abortTarget));
   return { shouldContinue: false, reply: { text: "⚙️ Agent was aborted." } };
 };

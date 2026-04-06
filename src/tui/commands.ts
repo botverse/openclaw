@@ -4,6 +4,7 @@ import { formatThinkingLevels, listThinkingLevelLabels } from "../auto-reply/thi
 import type { OpenClawConfig } from "../config/types.js";
 
 const VERBOSE_LEVELS = ["on", "off"];
+const FAST_LEVELS = ["status", "on", "off"];
 const REASONING_LEVELS = ["on", "off"];
 const ELEVATED_LEVELS = ["on", "off", "ask", "full"];
 const ACTIVATION_LEVELS = ["mention", "always"];
@@ -22,6 +23,7 @@ export type SlashCommandOptions = {
 
 const COMMAND_ALIASES: Record<string, string> = {
   elev: "elevated",
+  gwstatus: "gateway-status",
 };
 
 function createLevelCompletion(
@@ -52,13 +54,15 @@ export function parseCommand(input: string): ParsedCommand {
 export function getSlashCommands(options: SlashCommandOptions = {}): SlashCommand[] {
   const thinkLevels = listThinkingLevelLabels(options.provider, options.model);
   const verboseCompletions = createLevelCompletion(VERBOSE_LEVELS);
+  const fastCompletions = createLevelCompletion(FAST_LEVELS);
   const reasoningCompletions = createLevelCompletion(REASONING_LEVELS);
   const usageCompletions = createLevelCompletion(USAGE_FOOTER_LEVELS);
   const elevatedCompletions = createLevelCompletion(ELEVATED_LEVELS);
   const activationCompletions = createLevelCompletion(ACTIVATION_LEVELS);
   const commands: SlashCommand[] = [
     { name: "help", description: "Show slash command help" },
-    { name: "status", description: "Show gateway status summary" },
+    { name: "gateway-status", description: "Show gateway status summary" },
+    { name: "gwstatus", description: "Alias for /gateway-status" },
     { name: "agent", description: "Switch agent (or open picker)" },
     { name: "agents", description: "Open agent picker" },
     { name: "session", description: "Switch session (or open picker)" },
@@ -75,6 +79,11 @@ export function getSlashCommands(options: SlashCommandOptions = {}): SlashComman
         thinkLevels
           .filter((v) => v.startsWith(prefix.toLowerCase()))
           .map((value) => ({ value, label: value })),
+    },
+    {
+      name: "fast",
+      description: "Set fast mode on/off",
+      getArgumentCompletions: fastCompletions,
     },
     {
       name: "verbose",
@@ -138,10 +147,13 @@ export function helpText(options: SlashCommandOptions = {}): string {
     "/help",
     "/commands",
     "/status",
+    "/gateway-status",
+    "/gwstatus",
     "/agent <id> (or /agents)",
     "/session <key> (or /sessions)",
     "/model <provider/model> (or /models)",
     `/think <${thinkLevels}>`,
+    "/fast <status|on|off>",
     "/verbose <on|off>",
     "/reasoning <on|off>",
     "/usage <off|tokens|full>",
