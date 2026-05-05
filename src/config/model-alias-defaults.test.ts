@@ -1,9 +1,21 @@
-import { describe, expect, it } from "vitest";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONTEXT_TOKENS } from "../agents/defaults.js";
 import { applyModelDefaults } from "./defaults.js";
 import type { OpenClawConfig } from "./types.js";
 
 describe("applyModelDefaults", () => {
+  beforeEach(() => {
+    vi.stubEnv(
+      "OPENCLAW_BUNDLED_PLUGINS_DIR",
+      path.resolve(import.meta.dirname, "../../extensions"),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   function buildProxyProviderConfig(overrides?: { contextWindow?: number; maxTokens?: number }) {
     return {
       models: {
@@ -14,7 +26,7 @@ describe("applyModelDefaults", () => {
             api: "openai-completions",
             models: [
               {
-                id: "gpt-5.2",
+                id: "gpt-5.4",
                 name: "GPT-5.2",
                 reasoning: false,
                 input: ["text"],
@@ -29,21 +41,50 @@ describe("applyModelDefaults", () => {
     } satisfies OpenClawConfig;
   }
 
+  function buildMistralProviderConfig(overrides?: {
+    modelId?: string;
+    contextWindow?: number;
+    maxTokens?: number;
+  }) {
+    return {
+      models: {
+        providers: {
+          mistral: {
+            baseUrl: "https://api.mistral.ai/v1",
+            apiKey: "sk-mistral", // pragma: allowlist secret
+            api: "openai-completions",
+            models: [
+              {
+                id: overrides?.modelId ?? "mistral-large-latest",
+                name: "Mistral",
+                reasoning: false,
+                input: ["text", "image"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: overrides?.contextWindow ?? 262_144,
+                maxTokens: overrides?.maxTokens ?? 262_144,
+              },
+            ],
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+  }
+
   it("adds default aliases when models are present", () => {
     const cfg = {
       agents: {
         defaults: {
           models: {
-            "anthropic/claude-opus-4-6": {},
-            "openai/gpt-5.2": {},
+            "anthropic/claude-opus-4-7": {},
+            "openai/gpt-5.4": {},
           },
         },
       },
     } satisfies OpenClawConfig;
     const next = applyModelDefaults(cfg);
 
-    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-6"]?.alias).toBe("opus");
-    expect(next.agents?.defaults?.models?.["openai/gpt-5.2"]?.alias).toBe("gpt");
+    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-7"]?.alias).toBe("opus");
+    expect(next.agents?.defaults?.models?.["openai/gpt-5.4"]?.alias).toBe("gpt");
   });
 
   it("does not override existing aliases", () => {
@@ -51,7 +92,7 @@ describe("applyModelDefaults", () => {
       agents: {
         defaults: {
           models: {
-            "anthropic/claude-opus-4-5": { alias: "Opus" },
+            "anthropic/claude-opus-4-7": { alias: "Opus" },
           },
         },
       },
@@ -59,7 +100,7 @@ describe("applyModelDefaults", () => {
 
     const next = applyModelDefaults(cfg);
 
-    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-5"]?.alias).toBe("Opus");
+    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-7"]?.alias).toBe("Opus");
   });
 
   it("respects explicit empty alias disables", () => {
@@ -67,8 +108,9 @@ describe("applyModelDefaults", () => {
       agents: {
         defaults: {
           models: {
-            "google/gemini-3-pro-preview": { alias: "" },
+            "google/gemini-3.1-pro-preview": { alias: "" },
             "google/gemini-3-flash-preview": {},
+            "google/gemini-3.1-flash-lite-preview": {},
           },
         },
       },
@@ -76,9 +118,12 @@ describe("applyModelDefaults", () => {
 
     const next = applyModelDefaults(cfg);
 
-    expect(next.agents?.defaults?.models?.["google/gemini-3-pro-preview"]?.alias).toBe("");
+    expect(next.agents?.defaults?.models?.["google/gemini-3.1-pro-preview"]?.alias).toBe("");
     expect(next.agents?.defaults?.models?.["google/gemini-3-flash-preview"]?.alias).toBe(
       "gemini-flash",
+    );
+    expect(next.agents?.defaults?.models?.["google/gemini-3.1-flash-lite-preview"]?.alias).toBe(
+      "gemini-flash-lite",
     );
   });
 
@@ -105,13 +150,23 @@ describe("applyModelDefaults", () => {
     expect(model?.maxTokens).toBe(32768);
   });
 
+  it("normalizes stale mistral maxTokens that matched the full context window", () => {
+    const cfg = buildMistralProviderConfig();
+
+    const next = applyModelDefaults(cfg);
+    const model = next.models?.providers?.mistral?.models?.[0];
+
+    expect(model?.contextWindow).toBe(262144);
+    expect(model?.maxTokens).toBe(16384);
+  });
+
   it("defaults anthropic provider and model api to anthropic-messages", () => {
     const cfg = {
       models: {
         providers: {
           anthropic: {
             baseUrl: "https://relay.example.com/api",
-            apiKey: "cr_xxxx",
+            apiKey: "cr_xxxx", // pragma: allowlist secret
             models: [
               {
                 id: "claude-opus-4-6",

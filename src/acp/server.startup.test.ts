@@ -10,20 +10,29 @@ type GatewayClientAuth = {
   token?: string;
   password?: string;
 };
-type ResolveGatewayCredentialsWithSecretInputs = (params: unknown) => Promise<GatewayClientAuth>;
+type ResolveGatewayClientBootstrap = (params: unknown) => Promise<{
+  url: string;
+  urlSource: string;
+  auth: GatewayClientAuth;
+}>;
 
-const mockState = {
+const mockState = vi.hoisted(() => ({
   gateways: [] as MockGatewayClient[],
   gatewayAuth: [] as GatewayClientAuth[],
   agentSideConnectionCtor: vi.fn(),
   agentStart: vi.fn(),
-  resolveGatewayCredentialsWithSecretInputs: vi.fn<ResolveGatewayCredentialsWithSecretInputs>(
-    async (_params) => ({
+  routeLogsToStderr: vi.fn(),
+  startProxy: vi.fn(async (_config: unknown) => null as unknown),
+  stopProxy: vi.fn(async (_handle: unknown) => {}),
+  resolveGatewayClientBootstrap: vi.fn<ResolveGatewayClientBootstrap>(async (_params) => ({
+    url: "ws://127.0.0.1:18789",
+    urlSource: "local loopback",
+    auth: {
       token: undefined,
       password: undefined,
-    }),
-  ),
-};
+    },
+  })),
+}));
 
 class MockGatewayClient {
   private callbacks: GatewayClientCallbacks;
@@ -50,37 +59,78 @@ class MockGatewayClient {
 }
 
 vi.mock("@agentclientprotocol/sdk", () => ({
-  AgentSideConnection: class {
-    constructor(factory: (conn: unknown) => unknown, stream: unknown) {
-      mockState.agentSideConnectionCtor(factory, stream);
-      factory({});
-    }
+  AgentSideConnection: function AgentSideConnection(
+    factory: (conn: unknown) => unknown,
+    stream: unknown,
+  ) {
+    mockState.agentSideConnectionCtor(factory, stream);
+    factory({});
   },
   ndJsonStream: vi.fn(() => ({ type: "mock-stream" })),
 }));
 
-vi.mock("../config/config.js", () => ({
-  loadConfig: () => ({
+vi.mock("../config/config.js", () => {
+  const loadConfig = () => ({
     gateway: {
       mode: "local",
     },
-  }),
-}));
-
-vi.mock("../gateway/auth.js", () => ({
-  resolveGatewayAuth: () => ({}),
-}));
+  });
+  return {
+    getRuntimeConfig: loadConfig,
+    loadConfig,
+    resolveGatewayPort: vi.fn(() => 18_789),
+  };
+});
 
 vi.mock("../gateway/call.js", () => ({
-  buildGatewayConnectionDetails: () => ({
-    url: "ws://127.0.0.1:18789",
-  }),
-  resolveGatewayCredentialsWithSecretInputs: (params: unknown) =>
-    mockState.resolveGatewayCredentialsWithSecretInputs(params),
+  callGateway: vi.fn(),
+  buildGatewayConnectionDetails: ({ url }: { url?: string }) => {
+    if (typeof url === "string" && url.trim().length > 0) {
+      return {
+        url: url.trim(),
+        urlSource: "cli --url",
+      };
+    }
+    return {
+      url: "ws://127.0.0.1:18789",
+      urlSource: "local loopback",
+    };
+  },
+}));
+
+vi.mock("../gateway/client-bootstrap.js", () => ({
+  resolveGatewayClientBootstrap: (params: unknown) =>
+    mockState.resolveGatewayClientBootstrap(params),
 }));
 
 vi.mock("../gateway/client.js", () => ({
   GatewayClient: MockGatewayClient,
+}));
+
+vi.mock("../gateway/client-start-readiness.js", () => ({
+  startGatewayClientWhenEventLoopReady: vi.fn(async (client: MockGatewayClient) => {
+    client.start();
+    return {
+      ready: true,
+      elapsedMs: 0,
+      maxDriftMs: 0,
+      checks: 2,
+      aborted: false,
+    };
+  }),
+}));
+
+vi.mock("../infra/is-main.js", () => ({
+  isMainModule: () => false,
+}));
+
+vi.mock("../logging/console.js", () => ({
+  routeLogsToStderr: () => mockState.routeLogsToStderr(),
+}));
+
+vi.mock("../infra/net/proxy/proxy-lifecycle.js", () => ({
+  startProxy: (config: unknown) => mockState.startProxy(config),
+  stopProxy: (handle: unknown) => mockState.stopProxy(handle),
 }));
 
 vi.mock("./translator.js", () => ({
@@ -100,23 +150,15 @@ vi.mock("./translator.js", () => ({
 describe("serveAcpGateway startup", () => {
   let serveAcpGateway: typeof import("./server.js").serveAcpGateway;
 
-  beforeAll(async () => {
-    ({ serveAcpGateway } = await import("./server.js"));
-  });
+  function getMockGateway() {
+    const gateway = mockState.gateways[0];
+    if (!gateway) {
+      throw new Error("Expected mocked gateway instance");
+    }
+    return gateway;
+  }
 
-  beforeEach(() => {
-    mockState.gateways.length = 0;
-    mockState.gatewayAuth.length = 0;
-    mockState.agentSideConnectionCtor.mockReset();
-    mockState.agentStart.mockReset();
-    mockState.resolveGatewayCredentialsWithSecretInputs.mockReset();
-    mockState.resolveGatewayCredentialsWithSecretInputs.mockResolvedValue({
-      token: undefined,
-      password: undefined,
-    });
-  });
-
-  it("waits for gateway hello before creating AgentSideConnection", async () => {
+  function captureProcessSignalHandlers() {
     const signalHandlers = new Map<NodeJS.Signals, () => void>();
     const onceSpy = vi.spyOn(process, "once").mockImplementation(((
       signal: NodeJS.Signals,
@@ -125,24 +167,83 @@ describe("serveAcpGateway startup", () => {
       signalHandlers.set(signal, handler);
       return process;
     }) as typeof process.once);
+    return { signalHandlers, onceSpy };
+  }
+
+  async function emitHelloAndWaitForAgentSideConnection() {
+    await vi.waitFor(() => {
+      expect(mockState.gateways).toHaveLength(1);
+    });
+    const gateway = getMockGateway();
+    gateway.emitHello();
+    await vi.waitFor(() => {
+      expect(mockState.agentSideConnectionCtor).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  async function stopServeWithSigint(
+    signalHandlers: Map<NodeJS.Signals, () => void>,
+    servePromise: Promise<void>,
+  ) {
+    signalHandlers.get("SIGINT")?.();
+    await servePromise;
+  }
+
+  beforeAll(async () => {
+    ({ serveAcpGateway } = await import("./server.js"));
+  });
+
+  beforeEach(async () => {
+    mockState.gateways.length = 0;
+    mockState.gatewayAuth.length = 0;
+    mockState.agentSideConnectionCtor.mockReset();
+    mockState.agentStart.mockReset();
+    mockState.routeLogsToStderr.mockReset();
+    mockState.startProxy.mockReset();
+    mockState.stopProxy.mockReset();
+    mockState.startProxy.mockResolvedValue(null);
+    mockState.stopProxy.mockResolvedValue(undefined);
+    mockState.resolveGatewayClientBootstrap.mockReset();
+    mockState.resolveGatewayClientBootstrap.mockResolvedValue({
+      url: "ws://127.0.0.1:18789",
+      urlSource: "local loopback",
+      auth: {
+        token: undefined,
+        password: undefined,
+      },
+    });
+  });
+
+  it("waits for gateway hello before creating AgentSideConnection", async () => {
+    const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
 
     try {
       const servePromise = serveAcpGateway({});
       await Promise.resolve();
 
       expect(mockState.agentSideConnectionCtor).not.toHaveBeenCalled();
-      const gateway = mockState.gateways[0];
-      if (!gateway) {
-        throw new Error("Expected mocked gateway instance");
-      }
+      await emitHelloAndWaitForAgentSideConnection();
+      await stopServeWithSigint(signalHandlers, servePromise);
+    } finally {
+      onceSpy.mockRestore();
+    }
+  });
 
-      gateway.emitHello();
-      await vi.waitFor(() => {
-        expect(mockState.agentSideConnectionCtor).toHaveBeenCalledTimes(1);
-      });
+  it("routes logs to stderr before loading gateway config", async () => {
+    const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
 
-      signalHandlers.get("SIGINT")?.();
-      await servePromise;
+    try {
+      const servePromise = serveAcpGateway({});
+      await Promise.resolve();
+
+      expect(mockState.routeLogsToStderr).toHaveBeenCalledTimes(1);
+      expect(mockState.routeLogsToStderr.mock.invocationCallOrder[0]).toBeLessThan(
+        mockState.resolveGatewayClientBootstrap.mock.invocationCallOrder[0] ??
+          Number.MAX_SAFE_INTEGER,
+      );
+
+      await emitHelloAndWaitForAgentSideConnection();
+      await stopServeWithSigint(signalHandlers, servePromise);
     } finally {
       onceSpy.mockRestore();
     }
@@ -159,11 +260,7 @@ describe("serveAcpGateway startup", () => {
       const servePromise = serveAcpGateway({});
       await Promise.resolve();
 
-      const gateway = mockState.gateways[0];
-      if (!gateway) {
-        throw new Error("Expected mocked gateway instance");
-      }
-
+      const gateway = getMockGateway();
       gateway.emitConnectError("connect failed");
       await expect(servePromise).rejects.toThrow("connect failed");
       expect(mockState.agentSideConnectionCtor).not.toHaveBeenCalled();
@@ -173,43 +270,73 @@ describe("serveAcpGateway startup", () => {
   });
 
   it("passes resolved SecretInput gateway credentials to the ACP gateway client", async () => {
-    mockState.resolveGatewayCredentialsWithSecretInputs.mockResolvedValue({
-      token: undefined,
-      password: "resolved-secret-password",
+    mockState.resolveGatewayClientBootstrap.mockResolvedValue({
+      url: "ws://127.0.0.1:18789",
+      urlSource: "local loopback",
+      auth: {
+        token: undefined,
+        password: "resolved-secret-password", // pragma: allowlist secret
+      },
     });
-    const signalHandlers = new Map<NodeJS.Signals, () => void>();
-    const onceSpy = vi.spyOn(process, "once").mockImplementation(((
-      signal: NodeJS.Signals,
-      handler: () => void,
-    ) => {
-      signalHandlers.set(signal, handler);
-      return process;
-    }) as typeof process.once);
+    const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
 
     try {
       const servePromise = serveAcpGateway({});
       await Promise.resolve();
 
-      expect(mockState.resolveGatewayCredentialsWithSecretInputs).toHaveBeenCalledWith(
+      expect(mockState.resolveGatewayClientBootstrap).toHaveBeenCalledWith(
         expect.objectContaining({
           env: process.env,
         }),
       );
       expect(mockState.gatewayAuth[0]).toEqual({
         token: undefined,
-        password: "resolved-secret-password",
+        password: "resolved-secret-password", // pragma: allowlist secret
       });
 
-      const gateway = mockState.gateways[0];
-      if (!gateway) {
-        throw new Error("Expected mocked gateway instance");
-      }
-      gateway.emitHello();
-      await vi.waitFor(() => {
-        expect(mockState.agentSideConnectionCtor).toHaveBeenCalledTimes(1);
+      await emitHelloAndWaitForAgentSideConnection();
+      await stopServeWithSigint(signalHandlers, servePromise);
+    } finally {
+      onceSpy.mockRestore();
+    }
+  });
+
+  it("passes CLI URL override context into shared gateway auth resolution", async () => {
+    const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
+
+    try {
+      const servePromise = serveAcpGateway({
+        gatewayUrl: "wss://override.example/ws",
       });
-      signalHandlers.get("SIGINT")?.();
-      await servePromise;
+      await Promise.resolve();
+
+      expect(mockState.resolveGatewayClientBootstrap).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: process.env,
+          gatewayUrl: "wss://override.example/ws",
+        }),
+      );
+
+      await emitHelloAndWaitForAgentSideConnection();
+      await stopServeWithSigint(signalHandlers, servePromise);
+    } finally {
+      onceSpy.mockRestore();
+    }
+  });
+
+  it("does not proxy the standalone ACP control-plane Gateway connection", async () => {
+    const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
+
+    try {
+      const servePromise = serveAcpGateway({});
+      await vi.waitFor(() => {
+        expect(mockState.gateways).toHaveLength(1);
+      });
+
+      expect(mockState.startProxy).not.toHaveBeenCalled();
+      await emitHelloAndWaitForAgentSideConnection();
+      await stopServeWithSigint(signalHandlers, servePromise);
+      expect(mockState.stopProxy).not.toHaveBeenCalled();
     } finally {
       onceSpy.mockRestore();
     }

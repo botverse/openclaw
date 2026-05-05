@@ -1,10 +1,12 @@
 import { isReadHttpMethod } from "./control-ui-http-utils.js";
 
-export type ControlUiRequestClassification =
+type ControlUiRequestClassification =
   | { kind: "not-control-ui" }
   | { kind: "not-found" }
   | { kind: "redirect"; location: string }
   | { kind: "serve" };
+
+const ROOT_MOUNTED_GATEWAY_PROBE_PATHS = new Set(["/health", "/healthz", "/ready", "/readyz"]);
 
 export function classifyControlUiRequest(params: {
   basePath: string;
@@ -16,6 +18,11 @@ export function classifyControlUiRequest(params: {
   if (!basePath) {
     if (pathname === "/ui" || pathname.startsWith("/ui/")) {
       return { kind: "not-found" };
+    }
+    // Keep core probe routes outside the root-mounted SPA catch-all so the
+    // gateway probe handler can answer them even when the Control UI owns `/`.
+    if (ROOT_MOUNTED_GATEWAY_PROBE_PATHS.has(pathname)) {
+      return { kind: "not-control-ui" };
     }
     // Keep plugin-owned HTTP routes outside the root-mounted Control UI SPA
     // fallback so untrusted plugins cannot claim arbitrary UI paths.

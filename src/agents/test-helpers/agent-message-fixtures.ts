@@ -1,20 +1,6 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ToolResultMessage, Usage, UserMessage } from "@mariozechner/pi-ai";
-
-const ZERO_USAGE: Usage = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 0,
-  cost: {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    total: 0,
-  },
-};
+import type { AssistantMessage, UserMessage } from "@mariozechner/pi-ai";
+import { ZERO_USAGE_FIXTURE } from "./usage-fixtures.js";
 
 export function castAgentMessage(message: unknown): AgentMessage {
   return message as AgentMessage;
@@ -42,25 +28,9 @@ export function makeAgentAssistantMessage(
     api: "openai-responses",
     provider: "openai",
     model: "test-model",
-    usage: ZERO_USAGE,
+    usage: ZERO_USAGE_FIXTURE,
     stopReason: "stop",
     timestamp: 0,
     ...overrides,
-  };
-}
-
-export function makeAgentToolResultMessage(
-  overrides: Partial<ToolResultMessage> &
-    Pick<ToolResultMessage, "toolCallId" | "toolName" | "content">,
-): ToolResultMessage {
-  const { toolCallId, toolName, content, ...rest } = overrides;
-  return {
-    role: "toolResult",
-    toolCallId,
-    toolName,
-    content,
-    isError: false,
-    timestamp: 0,
-    ...rest,
   };
 }

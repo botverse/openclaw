@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { isNotFoundPathError, isPathInside } from "./path-guards.js";
 
-export type BoundaryPathIntent = "read" | "write" | "create" | "delete" | "stat";
+type BoundaryPathIntent = "read" | "write" | "create" | "delete" | "stat";
 
 export type BoundaryPathAliasPolicy = {
   allowFinalSymlinkForUnlink?: boolean;
@@ -22,7 +22,7 @@ export const BOUNDARY_PATH_ALIAS_POLICIES = {
   }),
 } as const;
 
-export type ResolveBoundaryPathParams = {
+type ResolveBoundaryPathParams = {
   absolutePath: string;
   rootPath: string;
   boundaryLabel: string;
@@ -32,7 +32,7 @@ export type ResolveBoundaryPathParams = {
   rootCanonicalPath?: string;
 };
 
-export type ResolvedBoundaryPathKind = "missing" | "file" | "directory" | "symlink" | "other";
+type ResolvedBoundaryPathKind = "missing" | "file" | "directory" | "symlink" | "other";
 
 export type ResolvedBoundaryPath = {
   absolutePath: string;
@@ -540,12 +540,9 @@ async function resolveOutsideBoundaryPathAsync(params: {
     return null;
   }
   const kind = await getPathKind(params.context.absolutePath, false);
-  return buildOutsideLexicalBoundaryPath({
+  return buildOutsideBoundaryPathFromContext({
     boundaryLabel: params.boundaryLabel,
-    rootCanonicalPath: params.context.rootCanonicalPath,
-    absolutePath: params.context.absolutePath,
-    canonicalOutsideLexicalPath: params.context.canonicalOutsideLexicalPath,
-    rootPath: params.context.rootPath,
+    context: params.context,
     kind,
   });
 }
@@ -558,13 +555,25 @@ function resolveOutsideBoundaryPathSync(params: {
     return null;
   }
   const kind = getPathKindSync(params.context.absolutePath, false);
+  return buildOutsideBoundaryPathFromContext({
+    boundaryLabel: params.boundaryLabel,
+    context: params.context,
+    kind,
+  });
+}
+
+function buildOutsideBoundaryPathFromContext(params: {
+  boundaryLabel: string;
+  context: BoundaryResolutionContext;
+  kind: { exists: boolean; kind: ResolvedBoundaryPathKind };
+}): ResolvedBoundaryPath {
   return buildOutsideLexicalBoundaryPath({
     boundaryLabel: params.boundaryLabel,
     rootCanonicalPath: params.context.rootCanonicalPath,
     absolutePath: params.context.absolutePath,
     canonicalOutsideLexicalPath: params.context.canonicalOutsideLexicalPath,
     rootPath: params.context.rootPath,
-    kind,
+    kind: params.kind,
   });
 }
 
@@ -651,7 +660,7 @@ function buildResolvedBoundaryPath(params: {
   };
 }
 
-export async function resolvePathViaExistingAncestor(targetPath: string): Promise<string> {
+async function resolvePathViaExistingAncestor(targetPath: string): Promise<string> {
   const normalized = path.resolve(targetPath);
   let cursor = normalized;
   const missingSuffix: string[] = [];

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import type {
   EndReason,
   GetCallStatusInput,
@@ -10,6 +11,7 @@ import type {
   PlayTtsInput,
   WebhookParseOptions,
   ProviderWebhookParseResult,
+  SendDtmfInput,
   StartListeningInput,
   StopListeningInput,
   WebhookContext,
@@ -65,10 +67,10 @@ export class MockProvider implements VoiceCallProvider {
     }
 
     const base = {
-      id: evt.id || crypto.randomUUID(),
+      id: evt.id ?? crypto.randomUUID(),
       callId: evt.callId,
       providerCallId: evt.providerCallId,
-      timestamp: evt.timestamp || Date.now(),
+      timestamp: evt.timestamp ?? Date.now(),
     };
 
     switch (evt.type) {
@@ -83,7 +85,7 @@ export class MockProvider implements VoiceCallProvider {
         return {
           ...base,
           type: evt.type,
-          text: payload.text || "",
+          text: payload.text ?? "",
         };
       }
 
@@ -98,7 +100,7 @@ export class MockProvider implements VoiceCallProvider {
         return {
           ...base,
           type: evt.type,
-          transcript: payload.transcript || "",
+          transcript: payload.transcript ?? "",
           isFinal: payload.isFinal ?? true,
           confidence: payload.confidence,
         };
@@ -109,7 +111,7 @@ export class MockProvider implements VoiceCallProvider {
         return {
           ...base,
           type: evt.type,
-          durationMs: payload.durationMs || 0,
+          durationMs: payload.durationMs ?? 0,
         };
       }
 
@@ -118,7 +120,7 @@ export class MockProvider implements VoiceCallProvider {
         return {
           ...base,
           type: evt.type,
-          digits: payload.digits || "",
+          digits: payload.digits ?? "",
         };
       }
 
@@ -127,7 +129,7 @@ export class MockProvider implements VoiceCallProvider {
         return {
           ...base,
           type: evt.type,
-          reason: payload.reason || "completed",
+          reason: payload.reason ?? "completed",
         };
       }
 
@@ -136,7 +138,7 @@ export class MockProvider implements VoiceCallProvider {
         return {
           ...base,
           type: evt.type,
-          error: payload.error || "unknown error",
+          error: payload.error ?? "unknown error",
           retryable: payload.retryable,
         };
       }
@@ -161,6 +163,10 @@ export class MockProvider implements VoiceCallProvider {
     // No-op for mock
   }
 
+  async sendDtmf(_input: SendDtmfInput): Promise<void> {
+    // No-op for mock
+  }
+
   async startListening(_input: StartListeningInput): Promise<void> {
     // No-op for mock
   }
@@ -170,7 +176,7 @@ export class MockProvider implements VoiceCallProvider {
   }
 
   async getCallStatus(input: GetCallStatusInput): Promise<GetCallStatusResult> {
-    const id = input.providerCallId.toLowerCase();
+    const id = normalizeLowercaseStringOrEmpty(input.providerCallId);
     if (id.includes("stale") || id.includes("ended") || id.includes("completed")) {
       return { status: "completed", isTerminal: true };
     }

@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { logVerbose } from "../../globals.js";
 import type { MsgContext } from "../templating.js";
+import { withFastReplyConfig } from "./get-reply-fast-path.js";
+import {
+  buildGetReplyGroupCtx,
+  createGetReplySessionState,
+  registerGetReplyRuntimeOverrides,
+} from "./get-reply.test-fixtures.js";
+import { loadGetReplyModuleForTest } from "./get-reply.test-loader.js";
+import { registerGetReplyCommonMocks } from "./get-reply.test-mocks.js";
 
 const mocks = vi.hoisted(() => ({
   applyMediaUnderstanding: vi.fn(async (..._args: unknown[]) => undefined),
@@ -10,28 +19,8 @@ const mocks = vi.hoisted(() => ({
   initSessionState: vi.fn(),
 }));
 
-vi.mock("../../agents/agent-scope.js", () => ({
-  resolveAgentDir: vi.fn(() => "/tmp/agent"),
-  resolveAgentWorkspaceDir: vi.fn(() => "/tmp/workspace"),
-  resolveSessionAgentId: vi.fn(() => "main"),
-  resolveAgentSkillsFilter: vi.fn(() => undefined),
-}));
-vi.mock("../../agents/model-selection.js", () => ({
-  resolveModelRefFromString: vi.fn(() => null),
-}));
-vi.mock("../../agents/timeout.js", () => ({
-  resolveAgentTimeoutMs: vi.fn(() => 60000),
-}));
-vi.mock("../../agents/workspace.js", () => ({
-  DEFAULT_AGENT_WORKSPACE_DIR: "/tmp/workspace",
-  ensureAgentWorkspace: vi.fn(async () => ({ dir: "/tmp/workspace" })),
-}));
-vi.mock("../../channels/model-overrides.js", () => ({
-  resolveChannelModelOverride: vi.fn(() => undefined),
-}));
-vi.mock("../../config/config.js", () => ({
-  loadConfig: vi.fn(() => ({})),
-}));
+registerGetReplyCommonMocks();
+
 vi.mock("../../globals.js", () => ({
   logVerbose: vi.fn(),
 }));
@@ -42,83 +31,43 @@ vi.mock("../../hooks/internal-hooks.js", () => ({
 vi.mock("../../link-understanding/apply.js", () => ({
   applyLinkUnderstanding: mocks.applyLinkUnderstanding,
 }));
+vi.mock("../../link-understanding/apply.runtime.js", () => ({
+  applyLinkUnderstanding: mocks.applyLinkUnderstanding,
+}));
 vi.mock("../../media-understanding/apply.js", () => ({
   applyMediaUnderstanding: mocks.applyMediaUnderstanding,
 }));
-vi.mock("../../runtime.js", () => ({
-  defaultRuntime: { log: vi.fn() },
-}));
-vi.mock("../command-auth.js", () => ({
-  resolveCommandAuthorization: vi.fn(() => ({ isAuthorizedSender: true })),
+vi.mock("../../media-understanding/apply.runtime.js", () => ({
+  applyMediaUnderstanding: mocks.applyMediaUnderstanding,
 }));
 vi.mock("./commands-core.js", () => ({
   emitResetCommandHooks: vi.fn(async () => undefined),
 }));
-vi.mock("./directive-handling.js", () => ({
-  resolveDefaultModel: vi.fn(() => ({
-    defaultProvider: "openai",
-    defaultModel: "gpt-4o-mini",
-    aliasIndex: new Map(),
-  })),
-}));
-vi.mock("./get-reply-directives.js", () => ({
-  resolveReplyDirectives: mocks.resolveReplyDirectives,
-}));
-vi.mock("./get-reply-inline-actions.js", () => ({
-  handleInlineActions: vi.fn(async () => ({ kind: "reply", reply: { text: "ok" } })),
-}));
-vi.mock("./get-reply-run.js", () => ({
-  runPreparedReply: vi.fn(async () => undefined),
-}));
-vi.mock("./inbound-context.js", () => ({
-  finalizeInboundContext: vi.fn((ctx: unknown) => ctx),
-}));
-vi.mock("./session-reset-model.js", () => ({
-  applyResetModelOverride: vi.fn(async () => undefined),
-}));
-vi.mock("./session.js", () => ({
-  initSessionState: mocks.initSessionState,
-}));
-vi.mock("./stage-sandbox-media.js", () => ({
-  stageSandboxMedia: vi.fn(async () => undefined),
-}));
-vi.mock("./typing.js", () => ({
-  createTypingController: vi.fn(() => ({
-    onReplyStart: async () => undefined,
-    startTypingLoop: async () => undefined,
-    startTypingOnText: async () => undefined,
-    refreshTypingTtl: () => undefined,
-    isActive: () => false,
-    markRunComplete: () => undefined,
-    markDispatchIdle: () => undefined,
-    cleanup: () => undefined,
-  })),
-}));
+registerGetReplyRuntimeOverrides(mocks);
 
-const { getReplyFromConfig } = await import("./get-reply.js");
+let getReplyFromConfig: typeof import("./get-reply.js").getReplyFromConfig;
+
+async function loadGetReplyRuntimeForTest() {
+  ({ getReplyFromConfig } = await loadGetReplyModuleForTest({ cacheKey: import.meta.url }));
+}
 
 function buildCtx(overrides: Partial<MsgContext> = {}): MsgContext {
-  return {
-    Provider: "telegram",
-    Surface: "telegram",
-    OriginatingChannel: "telegram",
-    OriginatingTo: "telegram:-100123",
-    ChatType: "group",
+  return buildGetReplyGroupCtx({
     Body: "<media:audio>",
     BodyForAgent: "<media:audio>",
     RawBody: "<media:audio>",
     CommandBody: "<media:audio>",
-    SessionKey: "agent:main:telegram:-100123",
-    From: "telegram:user:42",
-    To: "telegram:-100123",
     GroupChannel: "ops",
-    Timestamp: 1710000000000,
+    MediaPath: "/tmp/voice.ogg",
+    MediaUrl: "https://example.test/voice.ogg",
+    MediaType: "audio/ogg",
     ...overrides,
-  };
+  });
 }
 
 describe("getReplyFromConfig message hooks", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await loadGetReplyRuntimeForTest();
     delete process.env.OPENCLAW_TEST_FAST;
     mocks.applyMediaUnderstanding.mockReset();
     mocks.applyLinkUnderstanding.mockReset();
@@ -126,6 +75,7 @@ describe("getReplyFromConfig message hooks", () => {
     mocks.triggerInternalHook.mockReset();
     mocks.resolveReplyDirectives.mockReset();
     mocks.initSessionState.mockReset();
+    vi.mocked(logVerbose).mockReset();
 
     mocks.applyMediaUnderstanding.mockImplementation(async (...args: unknown[]) => {
       const { ctx } = args[0] as { ctx: MsgContext };
@@ -146,30 +96,19 @@ describe("getReplyFromConfig message hooks", () => {
     );
     mocks.triggerInternalHook.mockResolvedValue(undefined);
     mocks.resolveReplyDirectives.mockResolvedValue({ kind: "reply", reply: { text: "ok" } });
-    mocks.initSessionState.mockResolvedValue({
-      sessionCtx: {},
-      sessionEntry: {},
-      previousSessionEntry: {},
-      sessionStore: {},
-      sessionKey: "agent:main:telegram:-100123",
-      sessionId: "session-1",
-      isNewSession: false,
-      resetTriggered: false,
-      systemSent: false,
-      abortedLastRun: false,
-      storePath: "/tmp/sessions.json",
-      sessionScope: "per-chat",
-      groupResolution: undefined,
-      isGroup: true,
-      triggerBodyNormalized: "",
-      bodyStripped: "",
-    });
+    mocks.initSessionState.mockResolvedValue(
+      createGetReplySessionState({
+        sessionKey: "agent:main:telegram:-100123",
+        sessionScope: "per-chat",
+        isGroup: true,
+      }),
+    );
   });
 
   it("emits transcribed + preprocessed hooks with enriched context", async () => {
     const ctx = buildCtx();
 
-    await getReplyFromConfig(ctx, undefined, {});
+    await getReplyFromConfig(ctx, undefined, withFastReplyConfig({}));
 
     expect(mocks.createInternalHookEvent).toHaveBeenCalledTimes(2);
     expect(mocks.createInternalHookEvent).toHaveBeenNthCalledWith(
@@ -205,7 +144,7 @@ describe("getReplyFromConfig message hooks", () => {
       ctx.BodyForAgent = "<media:audio>";
     });
 
-    await getReplyFromConfig(buildCtx(), undefined, {});
+    await getReplyFromConfig(buildCtx(), undefined, withFastReplyConfig({}));
 
     expect(mocks.createInternalHookEvent).toHaveBeenCalledTimes(1);
     expect(mocks.createInternalHookEvent).toHaveBeenCalledWith(
@@ -219,7 +158,7 @@ describe("getReplyFromConfig message hooks", () => {
   it("skips message hooks in fast test mode", async () => {
     process.env.OPENCLAW_TEST_FAST = "1";
 
-    await getReplyFromConfig(buildCtx(), undefined, {});
+    await getReplyFromConfig(buildCtx(), undefined, withFastReplyConfig({}));
 
     expect(mocks.applyMediaUnderstanding).not.toHaveBeenCalled();
     expect(mocks.applyLinkUnderstanding).not.toHaveBeenCalled();
@@ -228,9 +167,95 @@ describe("getReplyFromConfig message hooks", () => {
   });
 
   it("skips message hooks when SessionKey is unavailable", async () => {
-    await getReplyFromConfig(buildCtx({ SessionKey: undefined }), undefined, {});
+    await getReplyFromConfig(
+      buildCtx({ SessionKey: undefined }),
+      undefined,
+      withFastReplyConfig({}),
+    );
 
     expect(mocks.createInternalHookEvent).not.toHaveBeenCalled();
     expect(mocks.triggerInternalHook).not.toHaveBeenCalled();
+  });
+
+  it("skips media and link understanding on plain text without attachments or urls", async () => {
+    await getReplyFromConfig(
+      buildCtx({
+        Body: "hello there",
+        BodyForAgent: "hello there",
+        RawBody: "hello there",
+        CommandBody: "hello there",
+        BodyForCommands: "hello there",
+        MediaPath: undefined,
+        MediaUrl: undefined,
+        MediaPaths: undefined,
+        MediaUrls: undefined,
+        MediaTypes: undefined,
+        Sticker: undefined,
+        StickerMediaIncluded: undefined,
+      }),
+      undefined,
+      withFastReplyConfig({}),
+    );
+
+    expect(mocks.applyMediaUnderstanding).not.toHaveBeenCalled();
+    expect(mocks.applyLinkUnderstanding).not.toHaveBeenCalled();
+  });
+
+  it("continues dispatching when media understanding fails before reply routing", async () => {
+    mocks.applyMediaUnderstanding.mockRejectedValueOnce(
+      new Error("Cannot find module '/tmp/openclaw/dist/media-understanding/apply.runtime-old.js'"),
+    );
+
+    const reply = await getReplyFromConfig(buildCtx(), undefined, withFastReplyConfig({}));
+
+    expect(reply).toEqual({ text: "ok" });
+    expect(mocks.applyMediaUnderstanding).toHaveBeenCalledTimes(1);
+    expect(mocks.initSessionState).toHaveBeenCalledTimes(1);
+    expect(mocks.resolveReplyDirectives).toHaveBeenCalledTimes(1);
+    expect(mocks.createInternalHookEvent).toHaveBeenCalledTimes(1);
+    expect(mocks.createInternalHookEvent).toHaveBeenCalledWith(
+      "message",
+      "preprocessed",
+      "agent:main:telegram:-100123",
+      expect.any(Object),
+    );
+    expect(logVerbose).toHaveBeenCalledWith(
+      expect.stringContaining("media understanding failed, proceeding with raw content"),
+    );
+  });
+
+  it("continues dispatching URL messages when link understanding fails before reply routing", async () => {
+    mocks.applyLinkUnderstanding.mockRejectedValueOnce(
+      new Error("Cannot find module '/tmp/openclaw/dist/link-understanding/apply.runtime-old.js'"),
+    );
+
+    const reply = await getReplyFromConfig(
+      buildCtx({
+        Body: "read https://example.test/page",
+        BodyForAgent: "read https://example.test/page",
+        RawBody: "read https://example.test/page",
+        CommandBody: "read https://example.test/page",
+        BodyForCommands: "read https://example.test/page",
+        MediaPath: undefined,
+        MediaUrl: undefined,
+        MediaPaths: undefined,
+        MediaUrls: undefined,
+        MediaTypes: undefined,
+        MediaType: undefined,
+        Sticker: undefined,
+        StickerMediaIncluded: undefined,
+      }),
+      undefined,
+      withFastReplyConfig({}),
+    );
+
+    expect(reply).toEqual({ text: "ok" });
+    expect(mocks.applyMediaUnderstanding).not.toHaveBeenCalled();
+    expect(mocks.applyLinkUnderstanding).toHaveBeenCalledTimes(1);
+    expect(mocks.initSessionState).toHaveBeenCalledTimes(1);
+    expect(mocks.resolveReplyDirectives).toHaveBeenCalledTimes(1);
+    expect(logVerbose).toHaveBeenCalledWith(
+      expect.stringContaining("link understanding failed, proceeding with raw content"),
+    );
   });
 });
