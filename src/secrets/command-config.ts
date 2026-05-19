@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { coerceSecretRef, resolveSecretInputRef } from "../config/types.secrets.js";
 import { getPath } from "./path-utils.js";
 import { isExpectedResolvedSecretValue } from "./secret-value.js";
@@ -79,7 +79,9 @@ export function analyzeCommandSecretAssignmentsFromSnapshot(params: {
       value: resolved,
     });
 
-    if (target.entry.secretShape === "sibling_ref" && explicitRef && inlineCandidateRef) {
+    const hasCompetingSiblingRef =
+      target.entry.secretShape === "sibling_ref" && explicitRef && inlineCandidateRef; // pragma: allowlist secret
+    if (hasCompetingSiblingRef) {
       diagnostics.push(
         `${target.path}: both inline and sibling ref were present; sibling ref took precedence.`,
       );

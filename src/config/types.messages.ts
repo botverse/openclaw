@@ -4,6 +4,18 @@ import type { TtsConfig } from "./types.tts.js";
 export type GroupChatConfig = {
   mentionPatterns?: string[];
   historyLimit?: number;
+  /**
+   * Controls how unmentioned always-on group chatter is submitted.
+   * Default: "user_request".
+   */
+  unmentionedInbound?: "user_request" | "room_event";
+  /**
+   * Controls how group/channel inbound events produce visible room replies. The
+   * message-tool mode requires explicit message sends for visible room output;
+   * final text stays private when the model misses the tool.
+   * Default: "automatic".
+   */
+  visibleReplies?: "automatic" | "message_tool";
 };
 
 export type DmConfig = {
@@ -54,10 +66,14 @@ export type StatusReactionsEmojiConfig = {
   tool?: string;
   coding?: string;
   web?: string;
+  deploy?: string;
+  build?: string;
+  concierge?: string;
   done?: string;
   error?: string;
   stallSoft?: string;
   stallHard?: string;
+  compacting?: string;
 };
 
 export type StatusReactionsTimingConfig = {
@@ -85,6 +101,15 @@ export type StatusReactionsConfig = {
 export type MessagesConfig = {
   /** @deprecated Use `whatsapp.messagePrefix` (WhatsApp-only inbound prefix). */
   messagePrefix?: string;
+  /**
+   * Controls how source inbound events produce visible replies across direct,
+   * group, and channel conversations. Group/channel events still default to
+   * `groupChat.visibleReplies` when it is set.
+   *
+   * Default: "automatic". In group/channel rooms, "message_tool" keeps final
+   * text private unless the model sends visibly through the message tool.
+   */
+  visibleReplies?: "automatic" | "message_tool";
   /**
    * Prefix auto-added to all outbound replies.
    *
@@ -147,6 +172,10 @@ export type CommandsConfig = {
   bashForegroundMs?: number;
   /** Allow /config command (default: false). */
   config?: boolean;
+  /** Allow /mcp command for OpenClaw-managed MCP settings (default: false). */
+  mcp?: boolean;
+  /** Allow /plugins command for plugin listing and enablement toggles (default: false). */
+  plugins?: boolean;
   /** Allow /debug command (default: false). */
   debug?: boolean;
   /** Allow restart commands/tools (default: true). */

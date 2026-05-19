@@ -1,12 +1,20 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { normalizePluginHttpPath } from "./http-path.js";
+import { findOverlappingPluginHttpRoute } from "./http-route-overlap.js";
 import type { PluginHttpRouteRegistration, PluginRegistry } from "./registry.js";
-import { requireActivePluginRegistry } from "./runtime.js";
+import { requireActivePluginHttpRouteRegistry } from "./runtime.js";
 
 export type PluginHttpRouteHandler = (
   req: IncomingMessage,
   res: ServerResponse,
 ) => Promise<boolean | void> | boolean | void;
+
+const pluginHttpRouteRegistryScope = new AsyncLocalStorage<PluginRegistry>();
+
+export function withPluginHttpRouteRegistry<T>(registry: PluginRegistry, run: () => T): T {
+  return pluginHttpRouteRegistryScope.run(registry, run);
+}
 
 export function registerPluginHttpRoute(params: {
   path?: string | null;
@@ -14,6 +22,7 @@ export function registerPluginHttpRoute(params: {
   handler: PluginHttpRouteHandler;
   auth: PluginHttpRouteRegistration["auth"];
   match?: PluginHttpRouteRegistration["match"];
+  gatewayRuntimeScopeSurface?: PluginHttpRouteRegistration["gatewayRuntimeScopeSurface"];
   replaceExisting?: boolean;
   pluginId?: string;
   source?: string;
@@ -21,7 +30,10 @@ export function registerPluginHttpRoute(params: {
   log?: (message: string) => void;
   registry?: PluginRegistry;
 }): () => void {
-  const registry = params.registry ?? requireActivePluginRegistry();
+  const registry =
+    params.registry ??
+    pluginHttpRouteRegistryScope.getStore() ??
+    requireActivePluginHttpRouteRegistry();
   const routes = registry.httpRoutes ?? [];
   registry.httpRoutes = routes;
 
@@ -33,6 +45,18 @@ export function registerPluginHttpRoute(params: {
   }
 
   const routeMatch = params.match ?? "exact";
+  const overlappingRoute = findOverlappingPluginHttpRoute(routes, {
+    path: normalizedPath,
+    match: routeMatch,
+  });
+  if (overlappingRoute && overlappingRoute.auth !== params.auth) {
+    params.log?.(
+      `plugin: route overlap denied at ${normalizedPath} (${routeMatch}, ${params.auth})${suffix}; ` +
+        `overlaps ${overlappingRoute.path} (${overlappingRoute.match}, ${overlappingRoute.auth}) ` +
+        `owned by ${overlappingRoute.pluginId ?? "unknown-plugin"} (${overlappingRoute.source ?? "unknown-source"})`,
+    );
+    return () => {};
+  }
   const existingIndex = routes.findIndex(
     (entry) => entry.path === normalizedPath && entry.match === routeMatch,
   );
@@ -65,6 +89,9 @@ export function registerPluginHttpRoute(params: {
     handler: params.handler,
     auth: params.auth,
     match: routeMatch,
+    ...(params.gatewayRuntimeScopeSurface
+      ? { gatewayRuntimeScopeSurface: params.gatewayRuntimeScopeSurface }
+      : {}),
     pluginId: params.pluginId,
     source: params.source,
   };

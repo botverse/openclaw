@@ -1,9 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mockProcessPlatform } from "../test-utils/vitest-spies.js";
 import { visibleWidth } from "./ansi.js";
-import { wrapNoteMessage } from "./note.js";
+import { resolveNoteColumns, wrapNoteMessage } from "./note.js";
 import { renderTable } from "./table.js";
 
 describe("renderTable", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
   it("prefers shrinking flex columns to avoid wrapping non-flex labels", () => {
     const out = renderTable({
       width: 40,
@@ -15,7 +21,7 @@ describe("renderTable", () => {
     });
 
     expect(out).toContain("Dashboard");
-    expect(out).toMatch(/│ Dashboard\s+│/);
+    expect(out).toMatch(/[│|] Dashboard\s+[│|]/);
   });
 
   it("expands flex columns to fill available width", () => {
@@ -77,7 +83,73 @@ describe("renderTable", () => {
     const lines = out.split("\n").filter((line) => line.includes("a"));
     for (const line of lines) {
       const resetIndex = line.lastIndexOf(reset);
-      const lastSep = line.lastIndexOf("│");
+      const lastSep = Math.max(line.lastIndexOf("│"), line.lastIndexOf("|"));
+      expect(resetIndex).toBeGreaterThan(-1);
+      expect(lastSep).toBeGreaterThan(resetIndex);
+    }
+  });
+
+  it("trims leading spaces on wrapped ANSI-colored continuation lines", () => {
+    const out = renderTable({
+      width: 113,
+      columns: [
+        { key: "Status", header: "Status", minWidth: 10 },
+        { key: "Skill", header: "Skill", minWidth: 18, flex: true },
+        { key: "Description", header: "Description", minWidth: 24, flex: true },
+        { key: "Source", header: "Source", minWidth: 10 },
+      ],
+      rows: [
+        {
+          Status: "✓ ready",
+          Skill: "🌤️ weather",
+          Description:
+            `\x1b[2mGet current weather and forecasts via wttr.in or Open-Meteo. ` +
+            `Use when: user asks about weather, temperature, or forecasts for any location.` +
+            `\x1b[0m`,
+          Source: "openclaw-bundled",
+        },
+      ],
+    });
+
+    const lines = out
+      .trimEnd()
+      .split("\n")
+      .filter((line) => line.includes("Use when"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("\u001b[2mUse when");
+    expect(lines[0]).not.toContain("│  Use when");
+    expect(lines[0]).not.toContain("│ \x1b[2m Use when");
+  });
+
+  it("keeps ANSI styling when a multiline cell wraps after an unstyled line", () => {
+    const muted = "\x1b[38;2;120;120;120m";
+    const resetForeground = "\x1b[39m";
+    const out = renderTable({
+      width: 62,
+      columns: [
+        { key: "Status", header: "Status", minWidth: 10 },
+        { key: "Source", header: "Source", minWidth: 24, flex: true },
+        { key: "Version", header: "Version", minWidth: 8 },
+      ],
+      rows: [
+        {
+          Status: "disabled",
+          Source:
+            "stock:codex/index.js\n" +
+            `${muted}Codex app-server harness and Codex-managed GPT model catalog.${resetForeground}`,
+          Version: "2026.5.12-beta.6",
+        },
+      ],
+    });
+
+    const descLines = out
+      .split("\n")
+      .filter((line) => line.includes("Codex") || line.includes("catalog."));
+    expect(descLines.length).toBeGreaterThan(1);
+    for (const line of descLines) {
+      expect(line).toContain(muted);
+      const resetIndex = line.lastIndexOf(resetForeground);
+      const lastSep = Math.max(line.lastIndexOf("│"), line.lastIndexOf("|"));
       expect(resetIndex).toBeGreaterThan(-1);
       expect(lastSep).toBeGreaterThan(resetIndex);
     }
@@ -98,6 +170,81 @@ describe("renderTable", () => {
     const line2Index = lines.findIndex((line) => line.includes("line2"));
     expect(line1Index).toBeGreaterThan(-1);
     expect(line2Index).toBe(line1Index + 1);
+  });
+
+  it("keeps table borders aligned when cells contain wide emoji graphemes", () => {
+    const width = 72;
+    const out = renderTable({
+      width,
+      columns: [
+        { key: "Status", header: "Status", minWidth: 10 },
+        { key: "Skill", header: "Skill", minWidth: 18 },
+        { key: "Description", header: "Description", minWidth: 18, flex: true },
+        { key: "Source", header: "Source", minWidth: 10 },
+      ],
+      rows: [
+        {
+          Status: "✗ missing",
+          Skill: "📸 peekaboo",
+          Description: "Capture screenshots from macOS windows and keep table wrapping stable.",
+          Source: "openclaw-bundled",
+        },
+      ],
+    });
+
+    for (const line of out.trimEnd().split("\n")) {
+      expect(visibleWidth(line)).toBe(width);
+    }
+  });
+
+  it("consumes unsupported escape sequences without hanging", () => {
+    const out = renderTable({
+      width: 48,
+      columns: [
+        { key: "K", header: "K", minWidth: 6 },
+        { key: "V", header: "V", minWidth: 12, flex: true },
+      ],
+      rows: [{ K: "row", V: "before \x1b[2J after" }],
+    });
+
+    expect(out).toContain("before");
+    expect(out).toContain("after");
+  });
+
+  it("falls back to ASCII borders on legacy Windows consoles", () => {
+    mockProcessPlatform("win32");
+    vi.stubEnv("WT_SESSION", "");
+    vi.stubEnv("TERM_PROGRAM", "");
+    vi.stubEnv("TERM", "vt100");
+
+    const out = renderTable({
+      columns: [
+        { key: "A", header: "A", minWidth: 6 },
+        { key: "B", header: "B", minWidth: 10, flex: true },
+      ],
+      rows: [{ A: "row", B: "value" }],
+    });
+
+    expect(out).toContain("+");
+    expect(out).not.toContain("┌");
+  });
+
+  it("keeps unicode borders on modern Windows terminals", () => {
+    mockProcessPlatform("win32");
+    vi.stubEnv("WT_SESSION", "1");
+    vi.stubEnv("TERM", "");
+    vi.stubEnv("TERM_PROGRAM", "");
+
+    const out = renderTable({
+      columns: [
+        { key: "A", header: "A", minWidth: 6 },
+        { key: "B", header: "B", minWidth: 10, flex: true },
+      ],
+      rows: [{ A: "row", B: "value" }],
+    });
+
+    expect(out).toContain("┌");
+    expect(out).not.toContain("+");
   });
 });
 
@@ -139,7 +286,8 @@ describe("wrapNoteMessage", () => {
     const lines = wrapped.split("\n");
     expect(lines.length).toBeGreaterThan(1);
     expect(lines[0]?.startsWith("- ")).toBe(true);
-    expect(lines.slice(1).every((line) => line.startsWith("  "))).toBe(true);
+    const unindentedContinuationLines = lines.slice(1).filter((line) => !line.startsWith("  "));
+    expect(unindentedContinuationLines).toStrictEqual([]);
   });
 
   it("preserves long Windows paths without inserting spaces/newlines", () => {
@@ -153,5 +301,21 @@ describe("wrapNoteMessage", () => {
     const input = "\\\\\\\\server\\\\share\\\\some\\\\really\\\\long\\\\path\\\\file.txt";
     const wrapped = wrapNoteMessage(input, { maxWidth: 12, columns: 80 });
     expect(wrapped).toBe(input);
+  });
+
+  it("clamps bogus TTY columns before clack wraps note text", () => {
+    expect(resolveNoteColumns(undefined)).toBe(80);
+    expect(resolveNoteColumns(0)).toBe(80);
+    expect(resolveNoteColumns(1)).toBe(80);
+    expect(resolveNoteColumns(79)).toBe(80);
+    expect(resolveNoteColumns(120)).toBe(120);
+  });
+
+  it("coerces nullish and non-string note messages before wrapping", () => {
+    expect(wrapNoteMessage(undefined, { maxWidth: 20, columns: 80 })).toBe("");
+    expect(wrapNoteMessage(null, { maxWidth: 20, columns: 80 })).toBe("");
+    expect(wrapNoteMessage(12345, { maxWidth: 20, columns: 80 })).toBe("12345");
+    expect(wrapNoteMessage(new Error("boom"), { maxWidth: 20, columns: 80 })).toBe("Error: boom");
+    expect(wrapNoteMessage({ message: "boom" }, { maxWidth: 20, columns: 80 })).toBe("");
   });
 });

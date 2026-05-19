@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import OpenClaw
 
-@Suite struct GatewayEndpointStoreTests {
+struct GatewayEndpointStoreTests {
     private func makeLaunchAgentSnapshot(
         env: [String: String],
         token: String?,
@@ -26,7 +26,7 @@ import Testing
         return defaults
     }
 
-    @Test func resolveGatewayTokenPrefersEnvAndFallsBackToLaunchd() {
+    @Test func `resolve gateway token prefers env and falls back to launchd`() {
         let snapshot = self.makeLaunchAgentSnapshot(
             env: ["OPENCLAW_GATEWAY_TOKEN": "launchd-token"],
             token: "launchd-token",
@@ -47,7 +47,7 @@ import Testing
         #expect(fallbackToken == "launchd-token")
     }
 
-    @Test func resolveGatewayTokenIgnoresLaunchdInRemoteMode() {
+    @Test func `resolve gateway token ignores launchd in remote mode`() {
         let snapshot = self.makeLaunchAgentSnapshot(
             env: ["OPENCLAW_GATEWAY_TOKEN": "launchd-token"],
             token: "launchd-token",
@@ -61,7 +61,34 @@ import Testing
         #expect(token == nil)
     }
 
-    @Test func resolveGatewayPasswordFallsBackToLaunchd() {
+    @Test func `resolve gateway token uses remote config token`() {
+        let token = GatewayEndpointStore._testResolveGatewayToken(
+            isRemote: true,
+            root: [
+                "gateway": [
+                    "remote": [
+                        "token": "  remote-token  ",
+                    ],
+                ],
+            ],
+            env: [:],
+            launchdSnapshot: nil)
+        #expect(token == "remote-token")
+    }
+
+    @Test func `remote password resolver trims remote config password`() {
+        let root: [String: Any] = [
+            "gateway": [
+                "remote": [
+                    "password": "  remote-pass  ",
+                ],
+            ],
+        ]
+
+        #expect(GatewayRemoteConfig.resolvePasswordString(root: root) == "remote-pass")
+    }
+
+    @Test func `resolve gateway password falls back to launchd`() {
         let snapshot = self.makeLaunchAgentSnapshot(
             env: ["OPENCLAW_GATEWAY_PASSWORD": "launchd-pass"],
             token: nil,
@@ -75,7 +102,7 @@ import Testing
         #expect(password == "launchd-pass")
     }
 
-    @Test func connectionModeResolverPrefersConfigModeOverDefaults() {
+    @Test func `connection mode resolver prefers config mode over defaults`() {
         let defaults = self.makeDefaults()
         defaults.set("remote", forKey: connectionModeKey)
 
@@ -89,7 +116,7 @@ import Testing
         #expect(resolved.mode == .local)
     }
 
-    @Test func connectionModeResolverTrimsConfigMode() {
+    @Test func `connection mode resolver trims config mode`() {
         let defaults = self.makeDefaults()
         defaults.set("local", forKey: connectionModeKey)
 
@@ -103,7 +130,7 @@ import Testing
         #expect(resolved.mode == .remote)
     }
 
-    @Test func connectionModeResolverFallsBackToDefaultsWhenMissingConfig() {
+    @Test func `connection mode resolver falls back to defaults when missing config`() {
         let defaults = self.makeDefaults()
         defaults.set("remote", forKey: connectionModeKey)
 
@@ -111,7 +138,7 @@ import Testing
         #expect(resolved.mode == .remote)
     }
 
-    @Test func connectionModeResolverFallsBackToDefaultsOnUnknownConfig() {
+    @Test func `connection mode resolver falls back to defaults on unknown config`() {
         let defaults = self.makeDefaults()
         defaults.set("local", forKey: connectionModeKey)
 
@@ -125,7 +152,7 @@ import Testing
         #expect(resolved.mode == .local)
     }
 
-    @Test func connectionModeResolverPrefersRemoteURLWhenModeMissing() {
+    @Test func `connection mode resolver prefers remote URL when mode missing`() {
         let defaults = self.makeDefaults()
         defaults.set("local", forKey: connectionModeKey)
 
@@ -141,35 +168,35 @@ import Testing
         #expect(resolved.mode == .remote)
     }
 
-    @Test func resolveLocalGatewayHostUsesLoopbackForAutoEvenWithTailnet() {
+    @Test func `resolve local gateway host uses loopback for auto even with tailnet`() {
         let host = GatewayEndpointStore._testResolveLocalGatewayHost(
             bindMode: "auto",
             tailscaleIP: "100.64.1.2")
         #expect(host == "127.0.0.1")
     }
 
-    @Test func resolveLocalGatewayHostUsesLoopbackForAutoWithoutTailnet() {
+    @Test func `resolve local gateway host uses loopback for auto without tailnet`() {
         let host = GatewayEndpointStore._testResolveLocalGatewayHost(
             bindMode: "auto",
             tailscaleIP: nil)
         #expect(host == "127.0.0.1")
     }
 
-    @Test func resolveLocalGatewayHostPrefersTailnetForTailnetMode() {
+    @Test func `resolve local gateway host prefers tailnet for tailnet mode`() {
         let host = GatewayEndpointStore._testResolveLocalGatewayHost(
             bindMode: "tailnet",
             tailscaleIP: "100.64.1.5")
         #expect(host == "100.64.1.5")
     }
 
-    @Test func resolveLocalGatewayHostFallsBackToLoopbackForTailnetMode() {
+    @Test func `resolve local gateway host falls back to loopback for tailnet mode`() {
         let host = GatewayEndpointStore._testResolveLocalGatewayHost(
             bindMode: "tailnet",
             tailscaleIP: nil)
         #expect(host == "127.0.0.1")
     }
 
-    @Test func resolveLocalGatewayHostUsesCustomBindHost() {
+    @Test func `resolve local gateway host uses custom bind host`() {
         let host = GatewayEndpointStore._testResolveLocalGatewayHost(
             bindMode: "custom",
             tailscaleIP: "100.64.1.9",
@@ -177,7 +204,34 @@ import Testing
         #expect(host == "192.168.1.10")
     }
 
-    @Test func dashboardURLUsesLocalBasePathInLocalMode() throws {
+    @Test func `local config uses local gateway auth and host resolution`() {
+        let snapshot = self.makeLaunchAgentSnapshot(
+            env: [:],
+            token: "launchd-token",
+            password: "launchd-pass")
+        let root: [String: Any] = [
+            "gateway": [
+                "bind": "tailnet",
+                "tls": ["enabled": true],
+                "remote": [
+                    "url": "wss://remote.example:443",
+                    "token": "remote-token",
+                ],
+            ],
+        ]
+
+        let config = GatewayEndpointStore._testLocalConfig(
+            root: root,
+            env: [:],
+            launchdSnapshot: snapshot,
+            tailscaleIP: "100.64.1.8")
+
+        #expect(config.url.absoluteString == "wss://100.64.1.8:\(GatewayEnvironment.gatewayPort())")
+        #expect(config.token == "launchd-token")
+        #expect(config.password == "launchd-pass")
+    }
+
+    @Test func `dashboard URL uses local base path in local mode`() throws {
         let config: GatewayConnection.Config = try (
             url: #require(URL(string: "ws://127.0.0.1:18789")),
             token: nil,
@@ -190,7 +244,7 @@ import Testing
         #expect(url.absoluteString == "http://127.0.0.1:18789/control/")
     }
 
-    @Test func dashboardURLSkipsLocalBasePathInRemoteMode() throws {
+    @Test func `dashboard URL skips local base path in remote mode`() throws {
         let config: GatewayConnection.Config = try (
             url: #require(URL(string: "ws://gateway.example:18789")),
             token: nil,
@@ -203,7 +257,7 @@ import Testing
         #expect(url.absoluteString == "http://gateway.example:18789/")
     }
 
-    @Test func dashboardURLPrefersPathFromConfigURL() throws {
+    @Test func `dashboard URL prefers path from config URL`() throws {
         let config: GatewayConnection.Config = try (
             url: #require(URL(string: "wss://gateway.example:443/remote-ui")),
             token: nil,
@@ -216,19 +270,148 @@ import Testing
         #expect(url.absoluteString == "https://gateway.example:443/remote-ui/")
     }
 
-    @Test func normalizeGatewayUrlAddsDefaultPortForLoopbackWs() {
+    @Test func `dashboard URL uses fragment token and omits password`() throws {
+        let config: GatewayConnection.Config = try (
+            url: #require(URL(string: "ws://127.0.0.1:18789")),
+            token: "abc123",
+            password: "sekret") // pragma: allowlist secret
+
+        let url = try GatewayEndpointStore.dashboardURL(
+            for: config,
+            mode: .local,
+            localBasePath: "/control")
+        #expect(url.absoluteString == "http://127.0.0.1:18789/control/#token=abc123")
+        #expect(url.query == nil)
+    }
+
+    @Test func `dashboard URL can use native auth token override`() throws {
+        let config: GatewayConnection.Config = try (
+            url: #require(URL(string: "ws://127.0.0.1:18789")),
+            token: nil,
+            password: "sekret") // pragma: allowlist secret
+
+        let url = try GatewayEndpointStore.dashboardURL(
+            for: config,
+            mode: .local,
+            localBasePath: "/control",
+            authToken: "device-token")
+        #expect(url.absoluteString == "http://127.0.0.1:18789/control/#token=device-token")
+        #expect(url.query == nil)
+    }
+
+    @Test func `normalize gateway url adds default port for loopback ws`() {
         let url = GatewayRemoteConfig.normalizeGatewayUrl("ws://127.0.0.1")
         #expect(url?.port == 18789)
         #expect(url?.absoluteString == "ws://127.0.0.1:18789")
     }
 
-    @Test func normalizeGatewayUrlRejectsNonLoopbackWs() {
+    @Test func `normalize gateway url accepts private network ws`() {
+        let url = GatewayRemoteConfig.normalizeGatewayUrl("ws://192.168.0.202:18789")
+        #expect(url?.absoluteString == "ws://192.168.0.202:18789")
+    }
+
+    @Test func `normalize gateway url accepts tailnet ws`() {
+        let url = GatewayRemoteConfig.normalizeGatewayUrl("ws://100.123.224.76:18789")
+        #expect(url?.absoluteString == "ws://100.123.224.76:18789")
+    }
+
+    @Test func `missing transport infers direct from private remote URL`() {
+        let root: [String: Any] = [
+            "gateway": [
+                "remote": [
+                    "url": "ws://192.168.0.202:18789",
+                ],
+            ],
+        ]
+
+        let resolution = GatewayRemoteConfig.resolveTransportResolution(root: root)
+        #expect(resolution.transport == .direct)
+        #expect(resolution.source == .inferredRemoteURL)
+        #expect(resolution.directURL?.absoluteString == "ws://192.168.0.202:18789")
+    }
+
+    @Test func `legacy loopback URL keeps SSH even with trusted SSH target`() {
+        let root: [String: Any] = [
+            "gateway": [
+                "remote": [
+                    "url": "ws://127.0.0.1:18789",
+                    "sshTarget": "steipete@192.168.0.202",
+                ],
+            ],
+        ]
+
+        let resolution = GatewayRemoteConfig.resolveTransportResolution(root: root)
+        #expect(resolution.transport == .ssh)
+        #expect(resolution.source == .legacySSH)
+        #expect(resolution.directURL == nil)
+    }
+
+    @Test func `explicit ssh keeps legacy tunnel even when target is direct capable`() {
+        let root: [String: Any] = [
+            "gateway": [
+                "remote": [
+                    "transport": "ssh",
+                    "url": "ws://127.0.0.1:18789",
+                    "sshTarget": "steipete@192.168.0.202",
+                ],
+            ],
+        ]
+
+        let resolution = GatewayRemoteConfig.resolveTransportResolution(root: root)
+        #expect(resolution.transport == .ssh)
+        #expect(resolution.source == .explicit)
+        #expect(resolution.directURL == nil)
+    }
+
+    @Test func `normalize gateway url rejects public host ws`() {
         let url = GatewayRemoteConfig.normalizeGatewayUrl("ws://gateway.example:18789")
         #expect(url == nil)
     }
 
-    @Test func normalizeGatewayUrlRejectsPrefixBypassLoopbackHost() {
+    @Test func `normalize gateway url rejects private ipv4 suffix host bypasses`() {
+        #expect(GatewayRemoteConfig.normalizeGatewayUrl("ws://192.168.0.202.attacker.example:18789") == nil)
+        #expect(GatewayRemoteConfig.normalizeGatewayUrl("ws://100.123.224.76.attacker.example:18789") == nil)
+    }
+
+    @Test func `normalize gateway url rejects ipv6 prefix hostname bypasses`() {
+        #expect(GatewayRemoteConfig.normalizeGatewayUrl("ws://fcorp.example:18789") == nil)
+        #expect(GatewayRemoteConfig.normalizeGatewayUrl("ws://fd-example.com:18789") == nil)
+    }
+
+    @Test func `normalize gateway url rejects prefix bypass loopback host`() {
         let url = GatewayRemoteConfig.normalizeGatewayUrl("ws://127.attacker.example")
         #expect(url == nil)
+    }
+
+    @Test func `resolve tls fingerprint trims remote config value`() {
+        let root: [String: Any] = [
+            "gateway": [
+                "remote": [
+                    "tlsFingerprint": " sha256:ABC123 ",
+                ],
+            ],
+        ]
+
+        #expect(GatewayRemoteConfig.resolveTLSFingerprint(root: root) == "sha256:ABC123")
+    }
+
+    @Test func `resolve tls fingerprint ignores blank or non string values`() {
+        let blank: [String: Any] = [
+            "gateway": [
+                "remote": [
+                    "tlsFingerprint": "   ",
+                ],
+            ],
+        ]
+        let nonString: [String: Any] = [
+            "gateway": [
+                "remote": [
+                    "tlsFingerprint": 123,
+                ],
+            ],
+        ]
+
+        #expect(GatewayRemoteConfig.resolveTLSFingerprint(root: blank) == nil)
+        #expect(GatewayRemoteConfig.resolveTLSFingerprint(root: nonString) == nil)
     }
 }
